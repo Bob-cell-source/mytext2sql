@@ -1,0 +1,97 @@
+# LLaMA-Factory SFT 训练说明
+
+本目录提供两套 SFT 训练模板：
+
+- `sft_action_focused_lora.yaml`
+  用于单轮拆分版数据
+- `sft_full_trajectory_lora.yaml`
+  用于整体轨迹多轮对话版数据
+
+对应数据目录：
+
+- `output/llamafactory_sft_v5`
+
+## 1. 数据版本说明
+
+### 单轮拆分版
+
+数据文件：
+
+- `output/llamafactory_sft_v5/train.json`
+- `output/llamafactory_sft_v5/val.json`
+
+特点：
+
+- 每条样本只监督“当前状态 -> 下一步动作”
+- 更适合先训一个稳定的 next-action policy
+
+### 整体轨迹版
+
+数据文件：
+
+- `output/llamafactory_sft_v5/train_full_trajectory.json`
+- `output/llamafactory_sft_v5/val_full_trajectory.json`
+
+特点：
+
+- 每条样本是一条完整多轮对话轨迹
+- observation 以 `user` 消息出现
+- action 以 `assistant` 消息出现
+- 更适合学多轮行为连续性
+
+## 2. 官方格式依据
+
+LLaMA-Factory 官方文档说明：
+
+- 自定义数据集需要在 `dataset_info.json` 中声明
+- SFT 支持 `alpaca` 与 `sharegpt` 格式
+- `sharegpt` 支持多轮对话
+- OpenAI 风格 `messages` 是 `sharegpt` 的一种特例
+
+参考：
+
+- https://llamafactory.readthedocs.io/en/latest/getting_started/data_preparation.html
+- https://llamafactory.readthedocs.io/en/latest/getting_started/sft.html
+
+## 3. 使用方式
+
+假设你已经把 `output/llamafactory_sft_v5/dataset_info.json` 放到 LLaMA-Factory 的 `data/` 目录，且训练数据文件也位于同一数据目录下。
+
+### 训练单轮拆分版
+
+```bash
+llamafactory-cli train training/llamafactory/sft_action_focused_lora.yaml
+```
+
+### 训练整体轨迹版
+
+```bash
+llamafactory-cli train training/llamafactory/sft_full_trajectory_lora.yaml
+```
+
+## 4. 推荐实验顺序
+
+建议先做：
+
+1. 单轮拆分版
+2. 整体轨迹版
+3. 两者 rollout 对比
+
+推荐比较指标：
+
+- 协议正确率
+- SQL 可执行率
+- 最终结果正确率
+- 平均 turn 数
+- 是否重复 probe
+
+## 5. 注意事项
+
+- `template` 必须和基座模型匹配
+- `dataset_dir` 要指向你在 LLaMA-Factory 中实际存放 `dataset_info.json` 的目录
+- 如果显存不足，优先调小：
+  - `cutoff_len`
+  - `per_device_train_batch_size`
+  - 增大 `gradient_accumulation_steps`
+- 如果你使用 Qwen 系列，请把 `template` 改成对应模板
+

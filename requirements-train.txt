@@ -1,0 +1,7 @@
+accelerate>=0.34,<2
+datasets>=2.19,<4
+peft>=0.12,<1
+sentencepiece>=0.2,<1
+transformers>=4.45,<5
+trl>=0.9,<1
+

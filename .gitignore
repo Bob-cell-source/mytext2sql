@@ -1,0 +1,65 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Local logs and temp files
+logs/
+tmp_new/
+tmp_agent_rl/
+*.log
+
+# Local debug / checkpoints
+debug_last_generated_sql.sql
+
+# Generated outputs
+output/
+saves/
+checkpoints/
+runs/
+
+# Training artifacts
+adapter_model/
+adapter_model*/
+lora/
+lora*/
+
+# Local databases / vectors / binary caches
+*.pkl
+*.pt
+*.bin
+*.safetensors
+*.json
+*.jsonl
+
+# Secrets / env files
+.env
+.env.*
+
+# Optional local copies of large data
+data/
+
+# md and other documentation files
+AGENTS.md
+generate_sft_dpo_data.py
