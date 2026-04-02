@@ -1,0 +1,169 @@
+# vLLM 批量推理说明
+
+这份文档用于说明如何在服务器上：
+
+1. 合并 LoRA 到基座模型
+2. 用 vLLM 跑批量推理
+3. 评估当前 SFT 模型在 `v5` 数据集上的离线效果
+
+## 1. 适用场景
+
+如果你现在是：
+
+- 已经完成了 LLaMA-Factory 的 LoRA SFT
+- 只需要评测一个 adapter
+- 想提升推理吞吐
+
+推荐流程就是：
+
+1. merge LoRA
+2. 使用 vLLM 做 batch inference
+
+## 2. 新增脚本
+
+- [merge_lora_adapter.py](/root/text2sql_RL/scripts/merge_lora_adapter.py)
+- [vllm_batch_infer.py](/root/text2sql_RL/scripts/vllm_batch_infer.py)
+
+## 3. 合并 LoRA
+
+示例命令：
+
+```bash
+python3 scripts/merge_lora_adapter.py \
+  --base-model-path /path/to/base_model \
+  --adapter-path /path/to/lora_adapter \
+  --output-path /path/to/merged_model \
+  --dtype bf16 \
+  --trust-remote-code \
+  --safe-serialization
+```
+
+说明：
+
+- `base-model-path`
+  基座模型目录
+
+- `adapter-path`
+  LLaMA-Factory 训练出的 LoRA adapter 目录
+
+- `output-path`
+  合并后模型目录，建议单独新建，不要覆盖基座模型
+
+- `dtype`
+  推荐 `bf16`
+
+## 4. 支持的数据集
+
+当前脚本支持两类评测数据：
+
+### 单轮拆分版
+
+- `output/llamafactory_sft_v5/val.json`
+
+特点：
+
+- 每条样本预测一步 action
+- 适合先看 next-action 学得怎么样
+
+### 整体轨迹版
+
+- `output/llamafactory_sft_v5/val_full_trajectory.json`
+
+特点：
+
+- 会把整条轨迹拆成多个 assistant 轮次做离线预测
+- 适合看多轮行为连续性
+
+## 5. 用 vLLM 跑单轮版
+
+```bash
+python3 scripts/vllm_batch_infer.py \
+  --model-path /path/to/merged_model \
+  --dataset-path output/llamafactory_sft_v5/val.json \
+  --output-path output/eval_reports/vllm_action_eval.json \
+  --max-new-tokens 512 \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.9 \
+  --max-model-len 8192 \
+  --trust-remote-code
+```
+
+如果你只是先冒烟：
+
+```bash
+python3 scripts/vllm_batch_infer.py \
+  --model-path /path/to/merged_model \
+  --dataset-path output/llamafactory_sft_v5/val.json \
+  --output-path output/eval_reports/vllm_action_smoke.json \
+  --max-samples 10 \
+  --trust-remote-code
+```
+
+## 6. 用 vLLM 跑整体轨迹版
+
+```bash
+python3 scripts/vllm_batch_infer.py \
+  --model-path /path/to/merged_model \
+  --dataset-path output/llamafactory_sft_v5/val_full_trajectory.json \
+  --output-path output/eval_reports/vllm_full_traj_eval.json \
+  --max-new-tokens 512 \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.9 \
+  --max-model-len 8192 \
+  --trust-remote-code
+```
+
+整体轨迹版通常输入更长，如果显存紧张，可以优先调：
+
+- `--max-model-len`
+- `--max-samples`
+- `--max-new-tokens`
+
+## 7. 输出内容
+
+`vllm_batch_infer.py` 会生成一个 JSON 报告，里面包含：
+
+- `metrics`
+- `predictions`
+
+其中 `metrics` 目前包含：
+
+- `exact_match_rate`
+- `protocol_valid_rate`
+- `reasoning_present_rate`
+- `action_type_accuracy`
+- `action_body_exact_match_rate`
+- `sql_action_body_exact_match_rate`
+- `solution_action_body_exact_match_rate`
+
+## 8. 怎么看这些指标
+
+最重要的是：
+
+- `protocol_valid_rate`
+  看模型能不能稳定输出 `<reasoning> + <sql|solution>`
+
+- `action_type_accuracy`
+  看模型会不会选对 `<sql>` 还是 `<solution>`
+
+- `action_body_exact_match_rate`
+  看动作主体内容和 gold 是否一致
+
+`exact_match_rate` 可以看，但更严格，因为 reasoning 措辞变化也会导致不完全相等。
+
+## 9. 推荐实验顺序
+
+建议按这个顺序：
+
+1. 先 merge LoRA
+2. 先跑单轮版 `val.json`
+3. 再跑整体轨迹版 `val_full_trajectory.json`
+4. 看离线指标
+5. 再接数据库做在线 SQL 执行评测
+
+## 10. 注意事项
+
+- `vLLM` 安装和 CUDA 版本耦合较强，建议在服务器上按官方文档安装
+- 如果基座模型需要特定 chat template，尽量保留 tokenizer 配置完整
+- 如果模型没有 chat template，脚本会回退到简单的 `SYSTEM/USER/ASSISTANT` 拼接格式
+- 如果你后面要做真实 SQL 评测，建议在离线文本评测通过后再接数据库
