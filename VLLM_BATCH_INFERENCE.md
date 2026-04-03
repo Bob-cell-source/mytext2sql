@@ -54,7 +54,17 @@ python3 scripts/merge_lora_adapter.py \
 
 ## 4. 支持的数据集
 
-当前脚本支持两类评测数据：
+当前脚本支持三类评测数据：
+
+### 普通版 Final-SQL Baseline
+
+- `output/llamafactory_baselines_v1/val_final_sql.json`
+
+特点：
+
+- 只预测最终 SQL
+- 不涉及 `<sql>/<solution>` 两阶段动作
+- 是传统 Text2SQL 基线
 
 ### 单轮拆分版
 
@@ -74,7 +84,29 @@ python3 scripts/merge_lora_adapter.py \
 - 会把整条轨迹拆成多个 assistant 轮次做离线预测
 - 适合看多轮行为连续性
 
-## 5. 用 vLLM 跑单轮版
+## 5. 用 vLLM 跑普通版 Final-SQL Baseline
+
+```bash
+python3 scripts/vllm_batch_infer_final_sql.py \
+  --model-path /path/to/merged_model \
+  --dataset-path output/llamafactory_baselines_v1/val_final_sql.json \
+  --output-path output/eval_reports/vllm_final_sql_baseline_eval.json \
+  --max-new-tokens 512 \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.9 \
+  --max-model-len 8192 \
+  --trust-remote-code
+```
+
+执行评测：
+
+```bash
+python3 scripts/evaluate_final_sql_execution_from_report.py \
+  --report-path output/eval_reports/vllm_final_sql_baseline_eval.json \
+  --output-path output/eval_reports/vllm_final_sql_baseline_exec_eval.json
+```
+
+## 6. 用 vLLM 跑单轮版
 
 ```bash
 python3 scripts/vllm_batch_infer.py \
@@ -99,7 +131,7 @@ python3 scripts/vllm_batch_infer.py \
   --trust-remote-code
 ```
 
-## 6. 用 vLLM 跑整体轨迹版
+## 7. 用 vLLM 跑整体轨迹版
 
 ```bash
 python3 scripts/vllm_batch_infer.py \
@@ -119,9 +151,9 @@ python3 scripts/vllm_batch_infer.py \
 - `--max-samples`
 - `--max-new-tokens`
 
-## 7. 输出内容
+## 8. 输出内容
 
-`vllm_batch_infer.py` 会生成一个 JSON 报告，里面包含：
+`vllm_batch_infer.py` / `vllm_batch_infer_final_sql.py` 会生成一个 JSON 报告，里面包含：
 
 - `metrics`
 - `predictions`
@@ -136,7 +168,7 @@ python3 scripts/vllm_batch_infer.py \
 - `sql_action_body_exact_match_rate`
 - `solution_action_body_exact_match_rate`
 
-## 8. 怎么看这些指标
+## 9. 怎么看这些指标
 
 最重要的是：
 
@@ -151,20 +183,29 @@ python3 scripts/vllm_batch_infer.py \
 
 `exact_match_rate` 可以看，但更严格，因为 reasoning 措辞变化也会导致不完全相等。
 
-## 9. 推荐实验顺序
+对于普通版 baseline，更重要的是：
+
+- `non_empty_rate`
+- `sql_exact_match_rate`
+- `pred_exec_success_rate`
+- `result_match_rate`
+
+## 10. 推荐实验顺序
 
 建议按这个顺序：
 
 1. 先 merge LoRA
-2. 先跑单轮版 `val.json`
-3. 再跑整体轨迹版 `val_full_trajectory.json`
-4. 看离线指标
-5. 再接数据库做在线 SQL 执行评测
+2. 先跑普通版 Final-SQL Baseline
+3. 再跑单轮版 `val.json`
+4. 再跑整体轨迹版 `val_full_trajectory.json`
+5. 看离线指标
+6. 再接数据库做在线 SQL 执行评测
 
-## 10. 从 vLLM 报告继续做 SQL 执行评测
+## 11. 从 vLLM 报告继续做 SQL 执行评测
 
 如果你已经拿到了 `vllm_batch_infer.py` 的离线文本评测报告，可以继续用：
 
+- [evaluate_final_sql_execution_from_report.py](/root/text2sql_RL/scripts/evaluate_final_sql_execution_from_report.py)
 - [evaluate_sql_execution_from_report.py](/root/text2sql_RL/scripts/evaluate_sql_execution_from_report.py)
 
 它会做这些事情：
@@ -206,7 +247,7 @@ python3 scripts/evaluate_sql_execution_from_report.py \
 
 这里的 `result_match_rate` 比单纯的 SQL 文本 exact match 更接近真实任务表现。
 
-## 11. 注意事项
+## 12. 注意事项
 
 - `vLLM` 安装和 CUDA 版本耦合较强，建议在服务器上按官方文档安装
 - 如果基座模型需要特定 chat template，尽量保留 tokenizer 配置完整
