@@ -114,18 +114,27 @@ def apply_chat_template_or_fallback(
     tokenizer: AutoTokenizer,
     messages: List[Dict[str, str]],
     system_prompt: Optional[str],
+    model_name_or_path: Optional[str] = None,
 ) -> str:
     full_messages: List[Dict[str, str]] = []
     if system_prompt:
         full_messages.append({"role": "system", "content": system_prompt})
     full_messages.extend(messages)
 
-    if getattr(tokenizer, "chat_template", None):
+    if tokenizer is not None and getattr(tokenizer, "chat_template", None):
         return tokenizer.apply_chat_template(
             full_messages,
             tokenize=False,
             add_generation_prompt=True,
         )
+
+    model_path_lower = (model_name_or_path or "").lower()
+    if "qwen" in model_path_lower:
+        parts: List[str] = []
+        for message in full_messages:
+            parts.append(f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>")
+        parts.append("<|im_start|>assistant\n")
+        return "\n".join(parts)
 
     parts: List[str] = []
     for message in full_messages:
@@ -136,9 +145,17 @@ def apply_chat_template_or_fallback(
 
 
 def load_model_and_tokenizer(model_name_or_path: str, adapter_path: Optional[str]):
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+    except Exception as exc:
+        print(
+            "Warning: failed to load tokenizer normally. "
+            "Falling back to manual prompt rendering.\n"
+            f"Tokenizer error: {type(exc).__name__}: {exc}"
+        )
+        tokenizer = None
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
@@ -262,6 +279,7 @@ def main():
             tokenizer=tokenizer,
             messages=example.prompt_messages,
             system_prompt=args.system_prompt,
+            model_name_or_path=args.model_name_or_path,
         )
         pred_output = generate_one(
             model=model,

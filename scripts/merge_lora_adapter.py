@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 
 import torch
@@ -12,6 +13,23 @@ DTYPE_MAP = {
     "fp16": torch.float16,
     "fp32": torch.float32,
 }
+
+
+def sanitize_tokenizer_config(model_dir: Path) -> None:
+    tokenizer_config_path = model_dir / "tokenizer_config.json"
+    if not tokenizer_config_path.exists():
+        return
+
+    data = json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
+    extra_special_tokens = data.get("extra_special_tokens")
+    if isinstance(extra_special_tokens, list):
+        data["_original_extra_special_tokens_list"] = extra_special_tokens
+        data["extra_special_tokens"] = {}
+        tokenizer_config_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"Sanitized tokenizer_config.json at: {tokenizer_config_path}")
 
 
 def parse_args():
@@ -57,6 +75,7 @@ def main():
         safe_serialization=args.safe_serialization,
     )
     tokenizer.save_pretrained(output_path)
+    sanitize_tokenizer_config(output_path)
 
     print(f"Merged model saved to: {output_path}")
 

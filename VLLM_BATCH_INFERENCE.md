@@ -161,7 +161,52 @@ python3 scripts/vllm_batch_infer.py \
 4. 看离线指标
 5. 再接数据库做在线 SQL 执行评测
 
-## 10. 注意事项
+## 10. 从 vLLM 报告继续做 SQL 执行评测
+
+如果你已经拿到了 `vllm_batch_infer.py` 的离线文本评测报告，可以继续用：
+
+- [evaluate_sql_execution_from_report.py](/root/text2sql_RL/scripts/evaluate_sql_execution_from_report.py)
+
+它会做这些事情：
+
+- 从 `pred_output` 中抽取 `<sql>` 或 `<solution>`
+- 从 `gold_output` 中抽取 gold SQL
+- 分别执行预测 SQL 和 gold SQL
+- 统计：
+  - 预测 SQL 可执行率
+  - action type 准确率
+  - 结果匹配率
+
+### 运行示例
+
+```bash
+python3 scripts/evaluate_sql_execution_from_report.py \
+  --report-path output/eval_reports/vllm_action_eval.json \
+  --output-path output/eval_reports/vllm_action_exec_eval.json
+```
+
+如果你只想先评 10 条：
+
+```bash
+python3 scripts/evaluate_sql_execution_from_report.py \
+  --report-path output/eval_reports/vllm_action_eval.json \
+  --output-path output/eval_reports/vllm_action_exec_eval_smoke.json \
+  --max-samples 10
+```
+
+### 输出指标
+
+脚本会输出：
+
+- `pred_exec_success_rate`
+- `gold_exec_success_rate`
+- `result_match_rate`
+- `pred_sql_exec_success_rate`
+- `pred_solution_exec_success_rate`
+
+这里的 `result_match_rate` 比单纯的 SQL 文本 exact match 更接近真实任务表现。
+
+## 11. 注意事项
 
 - `vLLM` 安装和 CUDA 版本耦合较强，建议在服务器上按官方文档安装
 - 如果基座模型需要特定 chat template，尽量保留 tokenizer 配置完整

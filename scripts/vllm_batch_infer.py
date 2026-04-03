@@ -24,6 +24,21 @@ class EvalExample:
     gold_output: str
 
 
+def try_load_tokenizer(model_path: str, trust_remote_code: bool):
+    try:
+        return AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=trust_remote_code,
+        )
+    except Exception as exc:
+        print(
+            "Warning: failed to load tokenizer normally. "
+            "Falling back to manual prompt rendering.\n"
+            f"Tokenizer error: {type(exc).__name__}: {exc}"
+        )
+        return None
+
+
 def normalize_text(text: str) -> str:
     return " ".join((text or "").strip().split())
 
@@ -111,18 +126,27 @@ def apply_chat_template_or_fallback(
     tokenizer,
     messages: List[Dict[str, str]],
     system_prompt: Optional[str],
+    model_path: Optional[str] = None,
 ) -> str:
     full_messages: List[Dict[str, str]] = []
     if system_prompt:
         full_messages.append({"role": "system", "content": system_prompt})
     full_messages.extend(messages)
 
-    if getattr(tokenizer, "chat_template", None):
+    if tokenizer is not None and getattr(tokenizer, "chat_template", None):
         return tokenizer.apply_chat_template(
             full_messages,
             tokenize=False,
             add_generation_prompt=True,
         )
+
+    model_path_lower = (model_path or "").lower()
+    if "qwen" in model_path_lower:
+        parts: List[str] = []
+        for message in full_messages:
+            parts.append(f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>")
+        parts.append("<|im_start|>assistant\n")
+        return "\n".join(parts)
 
     parts: List[str] = []
     for message in full_messages:
@@ -216,7 +240,7 @@ def main():
     if args.max_samples > 0:
         examples = examples[:args.max_samples]
 
-    tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer = try_load_tokenizer(
         args.model_path,
         trust_remote_code=args.trust_remote_code,
     )
@@ -225,6 +249,7 @@ def main():
             tokenizer=tokenizer,
             messages=example.prompt_messages,
             system_prompt=args.system_prompt,
+            model_path=args.model_path,
         )
         for example in examples
     ]
