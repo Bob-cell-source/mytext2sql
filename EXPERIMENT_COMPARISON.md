@@ -201,3 +201,33 @@
 - `scripts/evaluate_final_sql_execution_from_report.py`
 - `scripts/evaluate_sql_execution_from_report.py`
 - `scripts/analyze_sql_exec_failures.py`
+
+### 多版本对比汇总
+
+- `scripts/compare_experiment_reports.py`
+
+## 7. 三版本统一对比命令
+
+当你已经分别得到：
+
+- 普通版 baseline 的离线推理与执行评测
+- Agent 单轮版的离线推理、执行评测、失败分析
+- Agent 整体轨迹版的离线推理、执行评测、失败分析
+
+可以直接用下面的命令汇总三种版本：
+
+```bash
+python3 scripts/compare_experiment_reports.py \
+  --experiment "baseline::output/eval_reports/vllm_final_sql_baseline_eval.json::output/eval_reports/vllm_final_sql_baseline_exec_eval.json::" \
+  --experiment "agent_single_turn::output/eval_reports/vllm_action_eval.json::output/eval_reports/vllm_action_exec_eval.json::output/eval_reports/vllm_action_exec_failure_analysis.json" \
+  --experiment "agent_full_trajectory::output/eval_reports/vllm_full_traj_eval.json::output/eval_reports/vllm_full_traj_exec_eval.json::output/eval_reports/vllm_full_traj_exec_failure_analysis.json" \
+  --output-json output/eval_reports/experiment_comparison.json \
+  --output-md output/eval_reports/experiment_comparison.md
+```
+
+输出会包括：
+
+- JSON 版汇总
+- Markdown 表格版汇总
+
+Markdown 表格特别适合直接放到实验记录或汇报文档里。

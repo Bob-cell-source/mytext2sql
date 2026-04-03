@@ -117,3 +117,5 @@ llamafactory-cli train training/llamafactory/sft_full_trajectory_lora.yaml
   - `per_device_train_batch_size`
   - 增大 `gradient_accumulation_steps`
 - 如果你使用 Qwen 系列，请把 `template` 改成对应模板
+评估代码
+python3 evaluate_llamafactory_sft.py     --model-name-or-path /root/autodl-tmp/qwen2.5-coder-14B     --adapter-path saves/text2sql-agent/action-focused-lora     --dataset-path LlamaFactory/data/val.json   --output-path output/eval_reports/sft_action_eval.json     --max-samples 49     --max-new-tokens 512
