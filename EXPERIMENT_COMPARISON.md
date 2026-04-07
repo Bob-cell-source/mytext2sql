@@ -13,6 +13,12 @@
 | Agent 单轮拆分版 | 是 | `current state -> next action` | `<reasoning> + <sql>` 或 `<solution>` |
 | Agent 整体轨迹版 | 是 | 多轮对话轨迹建模 | 多轮 assistant action |
 
+在进入 RL 之后，建议再增加一个版本：
+
+| 版本 | 是否做 RL | 学什么任务 | 典型输出 |
+| --- | --- | --- | --- |
+| Agent 单轮版 + GRPO | 是 | `current state -> next action` 的 reward 优化 | `<reasoning> + <sql>` 或 `<solution>` |
+
 这里说的“普通版”不是“没训练过的 base model”，而是“做了 SFT，但任务形式是传统 final SQL 生成”。
 
 ### A. 普通版 Final-SQL Baseline
@@ -97,6 +103,36 @@
 
 - 模型能否学会完整多轮行为连续性
 
+### D. Agent 单轮版 + GRPO
+
+定义：
+
+- 以 `Agent 单轮 SFT` 模型为初始化
+- 用单步 RL / GRPO 继续优化：
+  - `state_t -> action_t`
+- reward 通过环境执行 SQL 后计算
+
+训练配置：
+
+- `scripts/prepare_grpo_dataset.py`
+- `scripts/train_grpo_trl.py`
+
+推荐评测分两层：
+
+1. **同口径验证集评测**
+   - `scripts/merge_lora_adapter.py`
+   - `scripts/vllm_batch_infer.py`
+   - `scripts/evaluate_sql_execution_from_report.py`
+
+2. **整题 rollout 评测**
+   - `scripts/evaluate_agent_rollout.py`
+
+适合回答的问题：
+
+- RL 是否继续提升了单轮 agent policy
+- RL 是否改善了最终 solution 的质量
+- RL 在完整题级 rollout 上的表现如何
+
 ## 2. 当前阶段的推荐结论
 
 在你目前已经跑过的实验里：
@@ -110,6 +146,7 @@
 1. 普通版 Final-SQL Baseline
 2. Agent 单轮拆分版
 3. Agent 整体轨迹版
+4. Agent 单轮版 + GRPO（在单轮版验证有效后进入）
 
 ## 3. 推荐对比指标
 
@@ -127,6 +164,22 @@
 - `result_match_rate`
 - `pred_sql_exec_success_rate`
 - `pred_solution_exec_success_rate`
+
+### Agent 单轮版 + GRPO
+
+先继续沿用上面的单轮版同口径指标：
+
+- `protocol_valid_rate`
+- `action_type_accuracy`
+- `pred_exec_success_rate`
+- `result_match_rate`
+- `pred_solution_exec_success_rate`
+
+再补一组完整 rollout 指标：
+
+- `avg_turns`
+- rollout 层面的 `result_match_rate`
+- `failure_breakdown`
 
 ## 4. 最小对照实验
 
@@ -206,6 +259,10 @@
 
 - `scripts/compare_experiment_reports.py`
 
+### RL / rollout 评测
+
+- `scripts/evaluate_agent_rollout.py`
+
 ## 7. 三版本统一对比命令
 
 当你已经分别得到：
@@ -231,3 +288,65 @@ python3 scripts/compare_experiment_reports.py \
 - Markdown 表格版汇总
 
 Markdown 表格特别适合直接放到实验记录或汇报文档里。
+
+## 8. 评测 GRPO 的推荐顺序
+
+如果你已经训练出了：
+
+- `SFT merged model`
+- `GRPO LoRA adapter`
+
+建议先做：
+
+### 第一步：merge RL LoRA
+
+```bash
+python3 scripts/merge_lora_adapter.py \
+  --base-model-path /path/to/merged_sft_model \
+  --adapter-path /path/to/grpo_adapter \
+  --output-path /path/to/grpo_merged_model \
+  --dtype bf16 \
+  --trust-remote-code \
+  --safe-serialization
+```
+
+### 第二步：用 vLLM 做同口径验证集评测
+
+```bash
+python3 scripts/vllm_batch_infer.py \
+  --model-path /path/to/grpo_merged_model \
+  --dataset-path output/llamafactory_sft_v5/val.json \
+  --output-path output/eval_reports/vllm_grpo_action_eval.json \
+  --max-new-tokens 512 \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.9 \
+  --max-model-len 8192 \
+  --trust-remote-code
+```
+
+```bash
+python3 scripts/evaluate_sql_execution_from_report.py \
+  --report-path output/eval_reports/vllm_grpo_action_eval.json \
+  --output-path output/eval_reports/vllm_grpo_action_exec_eval.json
+```
+
+这一步的意义是：
+
+- 和之前 `Agent 单轮 SFT` 完全同口径对比
+
+### 第三步：做整题 rollout 评测
+
+```bash
+python3 scripts/evaluate_agent_rollout.py \
+  --model-name-or-path /path/to/merged_sft_model \
+  --adapter-path /path/to/grpo_adapter \
+  --golden-path golden_sql_marked.json \
+  --schema-path schema.json \
+  --output-path output/eval_reports/grpo_rollout_full_gold.json \
+  --trust-remote-code
+```
+
+这一步的意义是：
+
+- 看完整题级 agent 行为
+- 看平均轮数与失败模式

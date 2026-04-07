@@ -183,6 +183,75 @@ python3 scripts/train_grpo_trl.py \
 
 如果这些指标相对当前 `Agent 单轮 SFT` 有提升，再继续扩大 GRPO 训练规模。
 
+## 7.1 训练后怎么评估 GRPO 模型
+
+建议分成两层。
+
+### 第一层：和之前 SFT 完全同口径对比
+
+如果你的 GRPO 训练结果是一个 RL LoRA adapter，推荐先 merge：
+
+```bash
+python3 scripts/merge_lora_adapter.py \
+  --base-model-path /path/to/merged_sft_model \
+  --adapter-path /path/to/grpo_adapter \
+  --output-path /path/to/grpo_merged_model \
+  --dtype bf16 \
+  --trust-remote-code \
+  --safe-serialization
+```
+
+然后用 vLLM 在和之前相同的 `val.json` 上评测：
+
+```bash
+python3 scripts/vllm_batch_infer.py \
+  --model-path /path/to/grpo_merged_model \
+  --dataset-path output/llamafactory_sft_v5/val.json \
+  --output-path output/eval_reports/vllm_grpo_action_eval.json \
+  --max-new-tokens 512 \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.9 \
+  --max-model-len 8192 \
+  --trust-remote-code
+```
+
+再做 SQL 执行评测：
+
+```bash
+python3 scripts/evaluate_sql_execution_from_report.py \
+  --report-path output/eval_reports/vllm_grpo_action_eval.json \
+  --output-path output/eval_reports/vllm_grpo_action_exec_eval.json
+```
+
+这样你就可以把：
+
+- `Agent 单轮 SFT`
+- `Agent 单轮 SFT + GRPO`
+
+放在同一套指标下直接比较。
+
+### 第二层：整题 rollout 评测
+
+如果你还想看完整题级 agent 表现，再跑：
+
+```bash
+python3 scripts/evaluate_agent_rollout.py \
+  --model-name-or-path /path/to/merged_sft_model \
+  --adapter-path /path/to/grpo_adapter \
+  --golden-path golden_sql_marked.json \
+  --schema-path schema.json \
+  --output-path output/eval_reports/grpo_rollout_full_gold.json \
+  --trust-remote-code
+```
+
+它会统计：
+
+- rollout 层面的 `result_match_rate`
+- `avg_turns`
+- `failure_breakdown`
+
+建议先做第一层，再做第二层。
+
 ## 8. 服务器环境准备
 
 如果你要在远端服务器上运行这套 GRPO 代码，建议按下面顺序准备。

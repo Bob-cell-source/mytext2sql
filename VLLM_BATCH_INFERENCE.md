@@ -19,6 +19,20 @@
 1. merge LoRA
 2. 使用 vLLM 做 batch inference
 
+这套流程同样适用于：
+
+- `SFT` 训练后的 LoRA adapter
+- `GRPO` / `RL` 训练后的 LoRA adapter
+
+如果你要做：
+
+- 和之前 SFT 完全同口径的验证集对比
+
+那么对 `GRPO` 模型也推荐：
+
+1. 先 merge RL LoRA
+2. 再用 vLLM 跑批量推理
+
 ## 2. 新增脚本
 
 - [merge_lora_adapter.py](/root/text2sql_RL/scripts/merge_lora_adapter.py)
@@ -253,3 +267,46 @@ python3 scripts/evaluate_sql_execution_from_report.py \
 - 如果基座模型需要特定 chat template，尽量保留 tokenizer 配置完整
 - 如果模型没有 chat template，脚本会回退到简单的 `SYSTEM/USER/ASSISTANT` 拼接格式
 - 如果你后面要做真实 SQL 评测，建议在离线文本评测通过后再接数据库
+
+## 13. 评测 GRPO / RL 模型
+
+如果你已经训练好了 GRPO 模型，并且当前输出是一个 RL LoRA adapter，推荐先 merge：
+
+```bash
+python3 scripts/merge_lora_adapter.py \
+  --base-model-path /path/to/merged_sft_model \
+  --adapter-path /path/to/grpo_adapter \
+  --output-path /path/to/grpo_merged_model \
+  --dtype bf16 \
+  --trust-remote-code \
+  --safe-serialization
+```
+
+然后继续沿用之前的单轮版评测口径：
+
+```bash
+python3 scripts/vllm_batch_infer.py \
+  --model-path /path/to/grpo_merged_model \
+  --dataset-path output/llamafactory_sft_v5/val.json \
+  --output-path output/eval_reports/vllm_grpo_action_eval.json \
+  --max-new-tokens 512 \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.9 \
+  --max-model-len 8192 \
+  --trust-remote-code
+```
+
+再接 SQL 执行评测：
+
+```bash
+python3 scripts/evaluate_sql_execution_from_report.py \
+  --report-path output/eval_reports/vllm_grpo_action_eval.json \
+  --output-path output/eval_reports/vllm_grpo_action_exec_eval.json
+```
+
+这样你就可以把：
+
+- `SFT 单轮版`
+- `GRPO 单轮版`
+
+放在同一套验证集、同一套指标下直接比较。
