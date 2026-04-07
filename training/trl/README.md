@@ -196,6 +196,35 @@ python3 scripts/train_grpo_online_trl.py \
 - 构造 `rollout_func`
 - 将在线 rollout 结果接入 `GRPOTrainer`
 - 记录中文时间统计
+- 记录输入 / 输出 token 统计
+- 记录 reward 曲线数据
+
+online 版训练时，默认还会额外写出：
+
+- `输出目录/timing_metrics.jsonl`
+- `输出目录/training_metrics.jsonl`
+
+其中：
+
+- `timing_metrics.jsonl`
+  - 主要看时间拆分
+  - 以及平均输入 / 输出 token 数、平均轮数等
+- `training_metrics.jsonl`
+  - 主要用于后续画 reward 曲线
+
+如果你想画训练 reward 曲线，可以执行：
+
+```bash
+python3 scripts/plot_grpo_reward_curve.py \
+  --input saves/grpo_online/online_14b/training_metrics.jsonl \
+  --output saves/grpo_online/online_14b/reward_curve.png
+```
+
+如果 `matplotlib` 未安装，需要先安装：
+
+```bash
+pip install matplotlib
+```
 
 ## 4. 旧版 single-step GRPO
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import inspect
 import json
 import sys
 import time
@@ -152,6 +153,16 @@ class OnlineTimingTracker:
         self.sql_exec_seconds = 0.0
         self.train_step_wall_seconds = 0.0
         self.train_step_count = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.max_prompt_tokens = 0
+        self.max_completion_tokens = 0
+        self.turn_count_total = 0
+        self.env_reward_total = 0.0
+        self.final_result_match_count = 0
+        self.group_reward_std_total = 0.0
+        self.group_count = 0
+        self.zero_std_group_count = 0
 
     def add_rollout_call(
         self,
@@ -161,6 +172,16 @@ class OnlineTimingTracker:
         env_step_seconds: float,
         sql_exec_seconds: float,
         episodes: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+        max_prompt_tokens: int,
+        max_completion_tokens: int,
+        turn_count_total: int,
+        env_reward_total: float,
+        final_result_match_count: int,
+        group_reward_std_total: float,
+        group_count: int,
+        zero_std_group_count: int,
     ) -> None:
         self.rollout_calls += 1
         self.episodes += episodes
@@ -168,6 +189,16 @@ class OnlineTimingTracker:
         self.generation_seconds += generation_seconds
         self.env_step_seconds += env_step_seconds
         self.sql_exec_seconds += sql_exec_seconds
+        self.prompt_tokens += prompt_tokens
+        self.completion_tokens += completion_tokens
+        self.max_prompt_tokens = max(self.max_prompt_tokens, max_prompt_tokens)
+        self.max_completion_tokens = max(self.max_completion_tokens, max_completion_tokens)
+        self.turn_count_total += turn_count_total
+        self.env_reward_total += env_reward_total
+        self.final_result_match_count += final_result_match_count
+        self.group_reward_std_total += group_reward_std_total
+        self.group_count += group_count
+        self.zero_std_group_count += zero_std_group_count
 
     def add_train_step(self, wall_seconds: float) -> None:
         self.train_step_wall_seconds += wall_seconds
@@ -179,6 +210,13 @@ class OnlineTimingTracker:
         avg_episode_generation = self.generation_seconds / self.episodes if self.episodes else 0.0
         avg_episode_env = self.env_step_seconds / self.episodes if self.episodes else 0.0
         avg_episode_sql = self.sql_exec_seconds / self.episodes if self.episodes else 0.0
+        avg_prompt_tokens = self.prompt_tokens / self.episodes if self.episodes else 0.0
+        avg_completion_tokens = self.completion_tokens / self.episodes if self.episodes else 0.0
+        avg_turn_count = self.turn_count_total / self.episodes if self.episodes else 0.0
+        avg_env_reward = self.env_reward_total / self.episodes if self.episodes else 0.0
+        final_result_match_rate = self.final_result_match_count / self.episodes if self.episodes else 0.0
+        avg_group_reward_std = self.group_reward_std_total / self.group_count if self.group_count else 0.0
+        zero_std_group_rate = self.zero_std_group_count / self.group_count if self.group_count else 0.0
         return {
             "train_steps": self.train_step_count,
             "rollout_calls": self.rollout_calls,
@@ -188,15 +226,26 @@ class OnlineTimingTracker:
             "avg_episode_generation_seconds": round(avg_episode_generation, 4),
             "avg_episode_env_seconds": round(avg_episode_env, 4),
             "avg_episode_sql_exec_seconds": round(avg_episode_sql, 4),
+            "avg_prompt_tokens": round(avg_prompt_tokens, 2),
+            "avg_completion_tokens": round(avg_completion_tokens, 2),
+            "max_prompt_tokens": int(self.max_prompt_tokens),
+            "max_completion_tokens": int(self.max_completion_tokens),
+            "avg_turn_count": round(avg_turn_count, 2),
+            "avg_env_reward": round(avg_env_reward, 4),
+            "final_result_match_rate": round(final_result_match_rate, 4),
+            "avg_group_reward_std": round(avg_group_reward_std, 4),
+            "zero_std_group_rate": round(zero_std_group_rate, 4),
         }
 
 
 class TimingCallback(TrainerCallback):
-    def __init__(self, tracker: OnlineTimingTracker, log_path: str):
+    def __init__(self, tracker: OnlineTimingTracker, log_path: str, metrics_log_path: str):
         self.tracker = tracker
         self._step_started_at = None
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.metrics_log_path = Path(metrics_log_path)
+        self.metrics_log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def on_step_begin(self, args, state, control, **kwargs):
         self._step_started_at = time.perf_counter()
@@ -217,6 +266,15 @@ class TimingCallback(TrainerCallback):
             "平均每个episode生成耗时(秒)": summary["avg_episode_generation_seconds"],
             "平均每个episode环境交互耗时(秒)": summary["avg_episode_env_seconds"],
             "平均每个episode SQL执行耗时(秒)": summary["avg_episode_sql_exec_seconds"],
+            "平均输入token数": summary["avg_prompt_tokens"],
+            "平均输出token数": summary["avg_completion_tokens"],
+            "最大输入token数": summary["max_prompt_tokens"],
+            "最大输出token数": summary["max_completion_tokens"],
+            "平均轮数": summary["avg_turn_count"],
+            "平均episode奖励": summary["avg_env_reward"],
+            "最终结果命中率": summary["final_result_match_rate"],
+            "组内reward标准差均值": summary["avg_group_reward_std"],
+            "组内reward零方差比例": summary["zero_std_group_rate"],
         }
         print("[时间统计]", json.dumps(chinese_summary, ensure_ascii=False))
         with self.log_path.open("a", encoding="utf-8") as f:
@@ -226,6 +284,19 @@ class TimingCallback(TrainerCallback):
                         "global_step": int(getattr(state, "global_step", 0)),
                         "timing_summary": chinese_summary,
                         "raw_summary": summary,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        with self.metrics_log_path.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "global_step": int(getattr(state, "global_step", 0)),
+                        "trainer_logs": logs or {},
+                        "rollout_summary": chinese_summary,
+                        "raw_rollout_summary": summary,
                     },
                     ensure_ascii=False,
                 )
@@ -246,7 +317,7 @@ class OnlineEpisodeRewardFunc:
 def build_training_args(args: argparse.Namespace) -> GRPOConfig:
     report_to = [] if args.report_to == "none" else [args.report_to]
     eval_strategy = "no" if not args.eval_dataset_path or args.eval_steps <= 0 else "steps"
-    common_kwargs = {
+    common_kwargs: Dict[str, Any] = {
         "output_dir": args.output_dir,
         "learning_rate": args.learning_rate,
         "per_device_train_batch_size": args.per_device_train_batch_size,
@@ -268,10 +339,19 @@ def build_training_args(args: argparse.Namespace) -> GRPOConfig:
     }
     if eval_strategy != "no":
         common_kwargs["eval_steps"] = args.eval_steps
-    try:
-        return GRPOConfig(eval_strategy=eval_strategy, **common_kwargs)
-    except TypeError:
-        return GRPOConfig(evaluation_strategy=eval_strategy, **common_kwargs)
+    sig = inspect.signature(GRPOConfig.__init__)
+    supported = set(sig.parameters.keys())
+
+    if "eval_strategy" in supported:
+        common_kwargs["eval_strategy"] = eval_strategy
+    elif "evaluation_strategy" in supported:
+        common_kwargs["evaluation_strategy"] = eval_strategy
+
+    filtered_kwargs = {key: value for key, value in common_kwargs.items() if key in supported}
+    dropped_keys = sorted(set(common_kwargs.keys()) - set(filtered_kwargs.keys()))
+    if dropped_keys:
+        print(f"[GRPOConfig兼容] 当前 TRL 版本不支持这些参数，已忽略: {', '.join(dropped_keys)}")
+    return GRPOConfig(**filtered_kwargs)
 
 
 def build_rollout_func(
@@ -294,34 +374,76 @@ def build_rollout_func(
         generation_seconds = 0.0
         env_step_seconds = 0.0
         sql_exec_seconds = 0.0
+        prompt_tokens_total = 0
+        completion_tokens_total = 0
+        max_prompt_tokens = 0
+        max_completion_tokens = 0
+        turn_count_total = 0
+        env_reward_total = 0.0
+        final_result_match_count = 0
+        group_reward_std_total = 0.0
+        group_count = 0
+        zero_std_group_count = 0
+        num_generations = max(1, int(getattr(trainer.args, "num_generations", 1) or 1))
 
         for prompt in prompts:
             seed_id = extract_seed_id_from_prompt(prompt)
             seed = seed_by_id[seed_id]
-            episode = rollout_once(
-                trainer=trainer,
-                env=env,
-                seed=seed,
-                use_chat_template=use_chat_template,
-            )
-            prompt_ids_batch.append(episode["prompt_ids"])
-            completion_ids_batch.append(episode["completion_ids"])
-            logprobs_batch.append(episode["logprobs"])
-            env_reward_batch.append(float(episode["env_reward"]))
-            turn_count_batch.append(int(episode["turn_count"]))
-            final_failure_batch.append(episode["final_failure_reason"])
-            final_result_match_batch.append(bool(episode["final_result_match"]))
-            episode_json_batch.append(episode["episode_json"])
-            generation_seconds += float(episode["generation_seconds"])
-            env_step_seconds += float(episode["env_step_seconds"])
-            sql_exec_seconds += float(episode["sql_exec_seconds"])
+            group_rewards: List[float] = []
+            for _ in range(num_generations):
+                episode = rollout_once(
+                    trainer=trainer,
+                    env=env,
+                    seed=seed,
+                    use_chat_template=use_chat_template,
+                )
+                prompt_ids_batch.append(episode["prompt_ids"])
+                completion_ids_batch.append(episode["completion_ids"])
+                logprobs_batch.append(episode["logprobs"])
+                env_reward_batch.append(float(episode["env_reward"]))
+                turn_count_batch.append(int(episode["turn_count"]))
+                final_failure_batch.append(episode["final_failure_reason"])
+                final_result_match_batch.append(bool(episode["final_result_match"]))
+                episode_json_batch.append(episode["episode_json"])
+                generation_seconds += float(episode["generation_seconds"])
+                env_step_seconds += float(episode["env_step_seconds"])
+                sql_exec_seconds += float(episode["sql_exec_seconds"])
+                prompt_token_count = len(episode["prompt_ids"])
+                completion_token_count = len(episode["completion_ids"])
+                prompt_tokens_total += prompt_token_count
+                completion_tokens_total += completion_token_count
+                max_prompt_tokens = max(max_prompt_tokens, prompt_token_count)
+                max_completion_tokens = max(max_completion_tokens, completion_token_count)
+                turn_count_total += int(episode["turn_count"])
+                env_reward_total += float(episode["env_reward"])
+                final_result_match_count += 1 if episode["final_result_match"] else 0
+                group_rewards.append(float(episode["env_reward"]))
+
+            if group_rewards:
+                group_count += 1
+                mean_reward = sum(group_rewards) / len(group_rewards)
+                variance = sum((value - mean_reward) ** 2 for value in group_rewards) / len(group_rewards)
+                std = variance ** 0.5
+                group_reward_std_total += std
+                if std <= 1e-8:
+                    zero_std_group_count += 1
 
         tracker.add_rollout_call(
             rollout_wall=time.perf_counter() - started,
             generation_seconds=generation_seconds,
             env_step_seconds=env_step_seconds,
             sql_exec_seconds=sql_exec_seconds,
-            episodes=len(prompts),
+            episodes=len(env_reward_batch),
+            prompt_tokens=prompt_tokens_total,
+            completion_tokens=completion_tokens_total,
+            max_prompt_tokens=max_prompt_tokens,
+            max_completion_tokens=max_completion_tokens,
+            turn_count_total=turn_count_total,
+            env_reward_total=env_reward_total,
+            final_result_match_count=final_result_match_count,
+            group_reward_std_total=group_reward_std_total,
+            group_count=group_count,
+            zero_std_group_count=zero_std_group_count,
         )
         return {
             "prompt_ids": prompt_ids_batch,
@@ -347,6 +469,7 @@ def build_trainer(
     use_chat_template: bool,
     seed_by_id: Dict[str, Dict[str, Any]],
     timing_log_path: str,
+    metrics_log_path: str,
 ):
     tracker = OnlineTimingTracker()
     reward_func = OnlineEpisodeRewardFunc()
@@ -374,7 +497,7 @@ def build_trainer(
         trainer_kwargs.pop("processing_class", None)
         trainer_kwargs["tokenizer"] = tokenizer
         trainer = GRPOTrainer(**trainer_kwargs)
-    trainer.add_callback(TimingCallback(tracker, timing_log_path))
+    trainer.add_callback(TimingCallback(tracker, timing_log_path, metrics_log_path))
     return trainer
 
 
@@ -396,6 +519,7 @@ def main() -> None:
     model, tokenizer = load_model_and_tokenizer(args)
     training_args = build_training_args(args)
     timing_log_path = args.timing_log_path or str(output_dir / "timing_metrics.jsonl")
+    metrics_log_path = str(output_dir / "training_metrics.jsonl")
     trainer = build_trainer(
         model=model,
         tokenizer=tokenizer,
@@ -405,6 +529,7 @@ def main() -> None:
         use_chat_template=args.use_chat_template,
         seed_by_id=seed_by_id,
         timing_log_path=timing_log_path,
+        metrics_log_path=metrics_log_path,
     )
 
     (output_dir / "run_config.json").write_text(

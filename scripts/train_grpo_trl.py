@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import inspect
 import json
 import sys
 import time
@@ -324,7 +325,7 @@ class SingleStepRewardFunc:
 def build_training_args(args: argparse.Namespace) -> GRPOConfig:
     report_to = [] if args.report_to == "none" else [args.report_to]
     eval_strategy = "no" if not args.eval_dataset_path or args.eval_steps <= 0 else "steps"
-    common_kwargs = {
+    common_kwargs: Dict[str, Any] = {
         "output_dir": args.output_dir,
         "learning_rate": args.learning_rate,
         "per_device_train_batch_size": args.per_device_train_batch_size,
@@ -346,10 +347,19 @@ def build_training_args(args: argparse.Namespace) -> GRPOConfig:
     }
     if eval_strategy != "no":
         common_kwargs["eval_steps"] = args.eval_steps
-    try:
-        return GRPOConfig(eval_strategy=eval_strategy, **common_kwargs)
-    except TypeError:
-        return GRPOConfig(evaluation_strategy=eval_strategy, **common_kwargs)
+    sig = inspect.signature(GRPOConfig.__init__)
+    supported = set(sig.parameters.keys())
+
+    if "eval_strategy" in supported:
+        common_kwargs["eval_strategy"] = eval_strategy
+    elif "evaluation_strategy" in supported:
+        common_kwargs["evaluation_strategy"] = eval_strategy
+
+    filtered_kwargs = {key: value for key, value in common_kwargs.items() if key in supported}
+    dropped_keys = sorted(set(common_kwargs.keys()) - set(filtered_kwargs.keys()))
+    if dropped_keys:
+        print(f"[GRPOConfig兼容] 当前 TRL 版本不支持这些参数，已忽略: {', '.join(dropped_keys)}")
+    return GRPOConfig(**filtered_kwargs)
 
 
 def build_trainer(

@@ -263,6 +263,47 @@ online 版的训练样本只是一批初始 seed：
 4. 终止规则必须清晰
 5. 先做小规模验证，再考虑大规模 GRPO
 
+## 2.1 Episode 级奖励与组内 reward 区分
+
+这里需要特别澄清一个容易混淆的点：
+
+- **episode 级奖励本身是完全合理的**
+- **不合理的是同一个 seed 的多个 generation 共享同一个 reward**
+
+对于 GRPO，一个 seed 在同一组内如果有 `num_generations = k` 个采样，那么正确形式应该是：
+
+- `generation_1 -> episode_1 -> reward_1`
+- `generation_2 -> episode_2 -> reward_2`
+- `generation_3 -> episode_3 -> reward_3`
+- ...
+
+也就是说：
+
+- 每个 generation 都可以对应一条完整 episode
+- 每个 episode 最终可以只对应一个 scalar reward
+- 这仍然是合法、合理的 GRPO 训练信号
+
+真正会破坏组内相对比较的是：
+
+- 同一 seed 的多个 generation 没有各自独立 rollout
+- 而是共享同一个 episode reward
+
+这样会导致：
+
+- 组内 reward 没有差异
+- 优势函数退化
+- GRPO 无法判断哪一个 generation 更好
+
+因此当前 online 版设计要求：
+
+1. 同一个 seed 的每个 generation 都必须独立 rollout
+2. 每个 generation 都必须得到自己的 episode reward
+3. 训练日志中要额外监控：
+   - 组内 reward 标准差
+   - 组内 reward 零方差比例
+
+如果大量组的 reward 方差为 0，说明当前 reward 设计过于稀疏，或者 rollout 没有真正产生行为差异，需要继续调整。
+
 ## 3. Observation 定义
 
 RL 环境中每一步看到的 observation 包括：
