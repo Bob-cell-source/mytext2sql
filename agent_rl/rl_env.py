@@ -372,3 +372,176 @@ class Text2SQLRLEnv:
                 "sql_exec_seconds": getattr(self.sql_env, "last_execution_seconds", 0.0),
             },
         }
+
+    def batch_step(self, states: List[RLEpisodeState], model_outputs: List[str]) -> List[Dict[str, Any]]:
+        if len(states) != len(model_outputs):
+            raise ValueError("states 和 model_outputs 数量不一致。")
+
+        step_started_at = time.perf_counter()
+        results: List[Optional[Dict[str, Any]]] = [None] * len(states)
+        pending_requests: List[Dict[str, Any]] = []
+
+        for idx, (state, model_output) in enumerate(zip(states, model_outputs)):
+            if state.done:
+                raise RuntimeError("Episode is already done.")
+
+            reward_breakdown: Dict[str, float] = {
+                "r_format": 0.0,
+                "r_exec_step": 0.0,
+                "r_final_result": 0.0,
+                "r_sql_ngram": 0.0,
+                "r_turn": 0.0,
+                "r_final_exec_fail": 0.0,
+            }
+
+            try:
+                action = parse_agent_output(model_output)
+            except ProtocolError as exc:
+                state.done = True
+                state.final_failure_reason = f"protocol_error: {exc}"
+                reward_breakdown["r_format"] = self.reward_config.format_error_penalty
+                results[idx] = {
+                    "state": state,
+                    "done": True,
+                    "action": None,
+                    "observation": None,
+                    "reward_breakdown": reward_breakdown,
+                    "reward": sum(reward_breakdown.values()),
+                    "final_rows": [],
+                    "timing_info": {
+                        "step_seconds": 0.0,
+                        "sql_exec_seconds": 0.0,
+                    },
+                }
+                continue
+
+            turn_id = state.turn_index
+            turns_left_after_step = max(0, state.max_turns - turn_id)
+            pending_requests.append(
+                {
+                    "idx": idx,
+                    "state": state,
+                    "action": action,
+                    "reward_breakdown": reward_breakdown,
+                    "turn_id": turn_id,
+                    "turns_left_after_step": turns_left_after_step,
+                    "is_last_turn_probe": turn_id == state.max_turns and action.action_type == "sql",
+                    "sql_id": f"{state.seed['seed_id']}_t{turn_id}",
+                    "sql_text": action.sql,
+                }
+            )
+
+        sql_requests = [
+            {
+                "sql_id": item["sql_id"],
+                "sql_text": item["sql_text"],
+                "turns_left": item["turns_left_after_step"],
+            }
+            for item in pending_requests
+        ]
+        sql_results = self.sql_env.execute_many_with_rows(sql_requests) if sql_requests else []
+        shared_sql_seconds = getattr(self.sql_env, "last_execution_seconds", 0.0)
+        per_item_sql_seconds = shared_sql_seconds / len(sql_requests) if sql_requests else 0.0
+
+        for request_meta, (observation, rows) in zip(pending_requests, sql_results):
+            idx = request_meta["idx"]
+            state = request_meta["state"]
+            action = request_meta["action"]
+            reward_breakdown = request_meta["reward_breakdown"]
+            turn_id = request_meta["turn_id"]
+            is_last_turn_probe = request_meta["is_last_turn_probe"]
+
+            history_item = RLHistoryItem(
+                turn_id=turn_id,
+                action={"action_type": action.action_type, "reasoning": action.reasoning, "sql": action.sql},
+                observation=observation,
+            )
+            state.history.append(history_item)
+
+            if action.action_type == "sql":
+                reward_breakdown["r_exec_step"] = compute_step_exec_reward(
+                    action_type="sql",
+                    observation_status=observation["status"],
+                    successful_probe_count_before_step=state.successful_probe_count,
+                    config=self.reward_config,
+                )
+                state.sql_probe_count += 1
+                if observation["status"] in {"success", "empty"}:
+                    state.successful_probe_count += 1
+
+            if is_last_turn_probe:
+                state.done = True
+                state.final_failure_reason = "last_turn_still_probe"
+                terminal = compute_terminal_rewards(
+                    final_action_type="sql",
+                    final_exec_success=False,
+                    pred_rows=[],
+                    gold_rows=state.seed["gold_result"],
+                    pred_sql=action.sql,
+                    gold_sql=state.seed["gold_sql"],
+                    sql_probe_count=state.sql_probe_count,
+                    difficulty=state.difficulty,
+                    config=self.reward_config,
+                )
+                reward_breakdown.update(terminal)
+                results[idx] = {
+                    "state": state,
+                    "done": True,
+                    "action": action,
+                    "observation": observation,
+                    "reward_breakdown": reward_breakdown,
+                    "reward": sum(reward_breakdown.values()),
+                    "final_rows": [],
+                    "timing_info": {
+                        "step_seconds": 0.0,
+                        "sql_exec_seconds": per_item_sql_seconds,
+                    },
+                }
+                continue
+
+            done = action.action_type == "solution" or turn_id >= state.max_turns
+            state.done = done
+            if done:
+                final_exec_success = observation["status"] in {"success", "empty"} if action.action_type == "solution" else False
+                terminal = compute_terminal_rewards(
+                    final_action_type=action.action_type,
+                    final_exec_success=final_exec_success,
+                    pred_rows=rows if action.action_type == "solution" else [],
+                    gold_rows=state.seed["gold_result"],
+                    pred_sql=action.sql,
+                    gold_sql=state.seed["gold_sql"],
+                    sql_probe_count=state.sql_probe_count,
+                    difficulty=state.difficulty,
+                    config=self.reward_config,
+                )
+                reward_breakdown.update(terminal)
+                if action.action_type == "solution":
+                    if not final_exec_success:
+                        state.final_failure_reason = "final_exec_fail"
+                    elif reward_breakdown["r_final_result"] <= 0:
+                        state.final_failure_reason = "final_result_mismatch"
+                    else:
+                        state.final_failure_reason = ""
+
+            results[idx] = {
+                "state": state,
+                "done": done,
+                "action": action,
+                "observation": observation,
+                "reward_breakdown": reward_breakdown,
+                "reward": sum(reward_breakdown.values()),
+                "final_rows": rows if action.action_type == "solution" else [],
+                "timing_info": {
+                    "step_seconds": 0.0,
+                    "sql_exec_seconds": per_item_sql_seconds,
+                },
+            }
+
+        total_step_seconds = time.perf_counter() - step_started_at
+        unresolved = [idx for idx, item in enumerate(results) if item is None]
+        if unresolved:
+            raise RuntimeError(f"batch_step 未产生完整结果，缺失索引: {unresolved}")
+        per_item_step_seconds = total_step_seconds / len(results) if results else 0.0
+        for item in results:
+            item["timing_info"]["step_seconds"] = per_item_step_seconds
+        return results

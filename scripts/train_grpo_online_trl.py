@@ -362,14 +362,15 @@ def build_rollout_func(
 ):
     def _rollout_func(prompts: List[str], trainer: Any) -> Dict[str, List[Any]]:
         env = Text2SQLRLEnv()
-        prompt_ids_batch: List[List[int]] = []
-        completion_ids_batch: List[List[int]] = []
-        logprobs_batch: List[List[float]] = []
-        env_reward_batch: List[float] = []
-        turn_count_batch: List[int] = []
-        final_failure_batch: List[str] = []
-        final_result_match_batch: List[bool] = []
-        episode_json_batch: List[str] = []
+        batch_size = len(prompts)
+        prompt_ids_batch: List[List[int] | None] = [None] * batch_size
+        completion_ids_batch: List[List[int] | None] = [None] * batch_size
+        logprobs_batch: List[List[float] | None] = [None] * batch_size
+        env_reward_batch: List[float | None] = [None] * batch_size
+        turn_count_batch: List[int | None] = [None] * batch_size
+        final_failure_batch: List[str | None] = [None] * batch_size
+        final_result_match_batch: List[bool | None] = [None] * batch_size
+        episode_json_batch: List[str | None] = [None] * batch_size
         started = time.perf_counter()
         generation_seconds = 0.0
         env_step_seconds = 0.0
@@ -384,28 +385,31 @@ def build_rollout_func(
         group_reward_std_total = 0.0
         group_count = 0
         zero_std_group_count = 0
-        num_generations = max(1, int(getattr(trainer.args, "num_generations", 1) or 1))
 
-        for prompt in prompts:
+        grouped_indices: Dict[str, List[int]] = {}
+        for idx, prompt in enumerate(prompts):
             seed_id = extract_seed_id_from_prompt(prompt)
+            grouped_indices.setdefault(seed_id, []).append(idx)
+
+        for seed_id, indices in grouped_indices.items():
             seed = seed_by_id[seed_id]
             group_rewards: List[float] = []
             episodes = rollout_many_for_seed(
                 trainer=trainer,
                 env=env,
                 seed=seed,
-                num_generations=num_generations,
+                num_generations=len(indices),
                 use_chat_template=use_chat_template,
             )
-            for episode in episodes:
-                prompt_ids_batch.append(episode["prompt_ids"])
-                completion_ids_batch.append(episode["completion_ids"])
-                logprobs_batch.append(episode["logprobs"])
-                env_reward_batch.append(float(episode["env_reward"]))
-                turn_count_batch.append(int(episode["turn_count"]))
-                final_failure_batch.append(episode["final_failure_reason"])
-                final_result_match_batch.append(bool(episode["final_result_match"]))
-                episode_json_batch.append(episode["episode_json"])
+            for out_idx, episode in zip(indices, episodes):
+                prompt_ids_batch[out_idx] = episode["prompt_ids"]
+                completion_ids_batch[out_idx] = episode["completion_ids"]
+                logprobs_batch[out_idx] = episode["logprobs"]
+                env_reward_batch[out_idx] = float(episode["env_reward"])
+                turn_count_batch[out_idx] = int(episode["turn_count"])
+                final_failure_batch[out_idx] = episode["final_failure_reason"]
+                final_result_match_batch[out_idx] = bool(episode["final_result_match"])
+                episode_json_batch[out_idx] = episode["episode_json"]
                 generation_seconds += float(episode["generation_seconds"])
                 env_step_seconds += float(episode["env_step_seconds"])
                 sql_exec_seconds += float(episode["sql_exec_seconds"])
@@ -434,7 +438,7 @@ def build_rollout_func(
             generation_seconds=generation_seconds,
             env_step_seconds=env_step_seconds,
             sql_exec_seconds=sql_exec_seconds,
-            episodes=len(env_reward_batch),
+            episodes=len([x for x in env_reward_batch if x is not None]),
             prompt_tokens=prompt_tokens_total,
             completion_tokens=completion_tokens_total,
             max_prompt_tokens=max_prompt_tokens,
@@ -446,6 +450,8 @@ def build_rollout_func(
             group_count=group_count,
             zero_std_group_count=zero_std_group_count,
         )
+        if any(item is None for item in prompt_ids_batch + completion_ids_batch + logprobs_batch):
+            raise RuntimeError("rollout_func 生成结果数量与输入 prompts 数量不一致。")
         return {
             "prompt_ids": prompt_ids_batch,
             "completion_ids": completion_ids_batch,

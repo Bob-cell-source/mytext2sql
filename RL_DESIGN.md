@@ -313,7 +313,7 @@ online 版的训练样本只是一批初始 seed：
 
 1. 对同一个 seed，按 `num_generations` 初始化多条独立 episode state
 2. 在每一轮 turn 上，对这些 state 的当前 prompt 做一次**批量 generate**
-3. 每条 generation 的输出分别送入各自的 `env.step(...)`
+3. 每条 generation 的输出分别送入各自的环境状态
 4. 每条 generation 独立更新自己的：
    - history
    - observation
@@ -357,6 +357,44 @@ online 版的训练样本只是一批初始 seed：
 - 比“一条 generation 跑到底，再跑下一条”更能利用 GPU
 - 同组 generation 的比较关系更自然
 - 仍然保持每条 generation 的独立 episode 语义
+
+### 当前 online 版是怎么做“SQL 合批执行”的
+
+在生成侧做完 batched generate 之后，当前实现不会再对 active states 逐条调用 `env.step(...)`。
+
+而是：
+
+1. 当前轮所有 active generation 的输出先统一进入 `env.batch_step(...)`
+2. `batch_step(...)` 会先逐条做协议解析，区分出：
+   - 协议错误
+   - 合法 `<sql>` / `<solution>`
+3. 对所有需要执行 SQL 的 action，统一组装成一个 SQL request list
+4. 调用 `SQLEnvironment.execute_many_with_rows(...)`
+5. 由 SQL 环境一次性写入 batch 输入文件，并调用底层 SQL 执行器处理整批 SQL
+6. 再按原顺序把每条 SQL 的 observation / rows 回填到各自 state
+7. 每条 generation 独立计算自己的：
+   - step reward
+   - terminal reward
+   - final failure reason
+
+因此当前 online 版是：
+
+- **按 turn 批量生成**
+- **按 turn 批量执行 SQL**
+- **按轨迹独立更新状态和奖励**
+
+这和早期版本的区别在于：
+
+- 早期版本：batched generate 之后仍然逐条 `env.step(...)`
+- 当前版本：batched generate 之后进入 `batch_step(...)`，再统一做 SQL 合批
+
+这样可以进一步减少：
+
+- Python 循环等待
+- 文件 I/O 次数
+- 数据库连接与执行器调用次数
+
+同时保持每条 generation 的独立 reward 语义不变。
 
 因此：
 

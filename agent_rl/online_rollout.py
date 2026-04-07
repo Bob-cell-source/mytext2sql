@@ -199,7 +199,14 @@ def rollout_many_for_seed(
             traj["completion_ids"].extend(generated["completion_ids"])
             traj["logprobs"].extend(generated["logprobs"])
 
-            step_result = env.step(states[state_idx], generated["text"])
+        step_results = env.batch_step(
+            [states[state_idx] for state_idx in active_indices],
+            [generated["text"] for generated in generated_batch],
+        )
+        for active_pos, state_idx in enumerate(active_indices):
+            step_result = step_results[active_pos]
+            generated = generated_batch[active_pos]
+            traj = trajectories[state_idx]
             timing_info = step_result.get("timing_info", {}) or {}
             traj["env_step_seconds"] += float(timing_info.get("step_seconds", 0.0) or 0.0)
             traj["sql_exec_seconds"] += float(timing_info.get("sql_exec_seconds", 0.0) or 0.0)

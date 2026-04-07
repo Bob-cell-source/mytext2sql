@@ -216,14 +216,22 @@ python3 scripts/train_grpo_online_trl.py \
 1. 同一个 seed 下先初始化 `num_generations` 条独立轨迹
 2. 在当前 turn，把这些轨迹的 prompt 组成一个 batch
 3. 用一次 batched `generate` 同时生成这些轨迹当前轮的输出
-4. 再分别对这些输出执行 SQL、更新 observation 和 state
-5. 下一轮只对仍未结束的轨迹继续 batched generate
+4. 这些输出会统一进入 `env.batch_step(...)`
+5. `batch_step(...)` 会把当前轮需要执行的 SQL 合并成一个 batch，统一调用 SQL 执行环境
+6. 再按原顺序把 observation / reward / state 更新回每条轨迹
+7. 下一轮只对仍未结束的轨迹继续 batched generate
 
 这样相较于完全串行 rollout：
 
 - GPU 利用率更高
 - 在线训练速度更合理
 - 同时不破坏“每条 generation 都是独立 episode”的语义
+
+当前 online 版的并行结构可以概括成：
+
+- 生成侧：**按 turn 批量生成**
+- 执行侧：**按 turn 合批执行 SQL**
+- 状态侧：**每条轨迹独立更新**
 
 - `scripts/train_grpo_online_trl.py`
 
