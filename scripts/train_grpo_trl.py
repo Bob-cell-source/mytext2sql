@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 
 import torch
 from datasets import Dataset
-from peft import PeftModel
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
 
@@ -29,7 +29,11 @@ DTYPE_MAP = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train single-step Text2SQL GRPO with TRL.")
     parser.add_argument("--base-model-path", required=True, help="Base model path or model id.")
-    parser.add_argument("--sft-adapter-path", default="", help="Optional SFT LoRA adapter path used as RL init.")
+    parser.add_argument(
+        "--sft-adapter-path",
+        default="",
+        help="Optional SFT LoRA adapter path used as RL init when base model is not already merged.",
+    )
     parser.add_argument("--train-dataset-path", required=True, help="Path to prepared GRPO train JSON.")
     parser.add_argument("--eval-dataset-path", default="", help="Optional GRPO eval JSON.")
     parser.add_argument("--output-dir", required=True, help="Output directory.")
@@ -59,6 +63,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-eval-samples", type=int, default=0)
     parser.add_argument("--resume-from-checkpoint", default="", help="Optional checkpoint path.")
     parser.add_argument("--report-to", default="none", help="Training report backend, e.g. none or wandb.")
+    parser.add_argument(
+        "--use-rl-lora",
+        action="store_true",
+        help="Wrap the loaded model with a fresh RL LoRA adapter. Recommended when base-model-path points to a merged SFT model.",
+    )
+    parser.add_argument("--rl-lora-r", type=int, default=64, help="Rank for fresh RL LoRA adapter.")
+    parser.add_argument("--rl-lora-alpha", type=int, default=128, help="Alpha for fresh RL LoRA adapter.")
+    parser.add_argument("--rl-lora-dropout", type=float, default=0.05, help="Dropout for fresh RL LoRA adapter.")
+    parser.add_argument(
+        "--rl-lora-target-modules",
+        default="all-linear",
+        help="Target modules for fresh RL LoRA. Use all-linear or comma-separated module names.",
+    )
     return parser.parse_args()
 
 
@@ -116,6 +133,15 @@ def maybe_apply_chat_template(dataset: Dataset, tokenizer: Any, use_chat_templat
     return dataset.map(_map_record, desc="Applying chat template")
 
 
+def parse_target_modules(value: str) -> str | List[str]:
+    raw = (value or "").strip()
+    if not raw:
+        return "all-linear"
+    if raw == "all-linear":
+        return raw
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def load_model_and_tokenizer(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(
         args.base_model_path,
@@ -129,8 +155,24 @@ def load_model_and_tokenizer(args: argparse.Namespace):
         torch_dtype=DTYPE_MAP[args.dtype],
         trust_remote_code=args.trust_remote_code,
     )
+    if args.sft_adapter_path and args.use_rl_lora:
+        raise ValueError(
+            "当前脚本暂不支持在未 merge 的 SFT adapter 上再叠一层新的 RL LoRA。"
+            "如果你已经 merge 了 SFT 模型，请只传 --base-model-path merged_model 并加 --use-rl-lora。"
+        )
     if args.sft_adapter_path:
         model = PeftModel.from_pretrained(model, args.sft_adapter_path, is_trainable=True)
+    elif args.use_rl_lora:
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=args.rl_lora_r,
+            lora_alpha=args.rl_lora_alpha,
+            lora_dropout=args.rl_lora_dropout,
+            target_modules=parse_target_modules(args.rl_lora_target_modules),
+            inference_mode=False,
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
         if hasattr(model.config, "use_cache"):

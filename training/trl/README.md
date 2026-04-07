@@ -55,14 +55,22 @@ python3 scripts/prepare_grpo_dataset.py \
 
 第一版建议：
 
-- 使用当前 `14B` 基座
-- 从已经训好的 `SFT adapter` 初始化
-- 用 `LoRA continuation` 的方式继续做 GRPO
+- 如果你还保留“base model + SFT adapter”两段式：
+  - 可以继续从 `SFT adapter` 初始化
+- 如果你已经把 `SFT` 模型 merge 成完整模型：
+  - 推荐在 merged 模型上再挂一个新的 `RL LoRA adapter`
 - 不要同卡再挂 `vLLM`
 
 ## 3. 推荐启动命令
 
-下面命令适合第一版小规模验证：
+### 3.1 未 merge 的 SFT 模型
+
+如果你手上还是：
+
+- `base model`
+- `SFT adapter`
+
+可以这样启动：
 
 ```bash
 python3 scripts/train_grpo_trl.py \
@@ -86,6 +94,43 @@ python3 scripts/train_grpo_trl.py \
   --gradient-checkpointing \
   --use-chat-template
 ```
+
+### 3.2 已 merge 的 SFT 模型
+
+如果你已经把 `SFT` 结果 merge 成一个完整模型目录，推荐这样启动：
+
+```bash
+python3 scripts/train_grpo_trl.py \
+  --base-model-path /path/to/merged_sft_model \
+  --train-dataset-path output/rl_training_inputs_v1/train_rl_single_step.json \
+  --eval-dataset-path output/rl_training_inputs_v1/val_rl_single_step.json \
+  --output-dir saves/grpo/single_step_14b \
+  --dtype bf16 \
+  --trust-remote-code \
+  --per-device-train-batch-size 1 \
+  --gradient-accumulation-steps 4 \
+  --learning-rate 5e-6 \
+  --num-train-epochs 1 \
+  --num-generations 2 \
+  --max-prompt-length 3072 \
+  --max-completion-length 512 \
+  --logging-steps 5 \
+  --save-steps 50 \
+  --eval-steps 50 \
+  --gradient-checkpointing \
+  --use-chat-template \
+  --use-rl-lora \
+  --rl-lora-r 64 \
+  --rl-lora-alpha 128 \
+  --rl-lora-dropout 0.05 \
+  --rl-lora-target-modules all-linear
+```
+
+说明：
+
+- 这时不要再传 `--sft-adapter-path`
+- `--use-rl-lora` 表示在 merged 的 SFT 模型上再挂一层新的 RL LoRA adapter
+- 这样比“直接训练 merge 后全模型”更稳，也更省显存
 
 ## 4. 参数建议
 
@@ -235,8 +280,7 @@ python3 scripts/prepare_grpo_dataset.py \
 
 ```bash
 python3 scripts/train_grpo_trl.py \
-  --base-model-path /path/to/base_model \
-  --sft-adapter-path /path/to/sft_adapter \
+  --base-model-path /path/to/merged_sft_model \
   --train-dataset-path output/rl_training_inputs_v1/train_rl_single_step.json \
   --eval-dataset-path output/rl_training_inputs_v1/val_rl_single_step.json \
   --output-dir saves/grpo/smoke_single_step_14b \
@@ -254,6 +298,11 @@ python3 scripts/train_grpo_trl.py \
   --eval-steps 50 \
   --gradient-checkpointing \
   --use-chat-template \
+  --use-rl-lora \
+  --rl-lora-r 64 \
+  --rl-lora-alpha 128 \
+  --rl-lora-dropout 0.05 \
+  --rl-lora-target-modules all-linear \
   --max-train-samples 32 \
   --max-eval-samples 8
 ```
@@ -272,8 +321,7 @@ smoke test 没问题后，再跑正式版：
 
 ```bash
 python3 scripts/train_grpo_trl.py \
-  --base-model-path /path/to/base_model \
-  --sft-adapter-path /path/to/sft_adapter \
+  --base-model-path /path/to/merged_sft_model \
   --train-dataset-path output/rl_training_inputs_v1/train_rl_single_step.json \
   --eval-dataset-path output/rl_training_inputs_v1/val_rl_single_step.json \
   --output-dir saves/grpo/single_step_14b \
@@ -290,7 +338,12 @@ python3 scripts/train_grpo_trl.py \
   --save-steps 50 \
   --eval-steps 50 \
   --gradient-checkpointing \
-  --use-chat-template
+  --use-chat-template \
+  --use-rl-lora \
+  --rl-lora-r 64 \
+  --rl-lora-alpha 128 \
+  --rl-lora-dropout 0.05 \
+  --rl-lora-target-modules all-linear
 ```
 
 训练输出会保存在：
