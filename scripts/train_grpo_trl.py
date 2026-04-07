@@ -2,6 +2,7 @@
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -9,6 +10,7 @@ import torch
 from datasets import Dataset
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.trainer_callback import TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +65,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-eval-samples", type=int, default=0)
     parser.add_argument("--resume-from-checkpoint", default="", help="Optional checkpoint path.")
     parser.add_argument("--report-to", default="none", help="Training report backend, e.g. none or wandb.")
+    parser.add_argument(
+        "--timing-log-path",
+        default="",
+        help="Optional timing log JSONL path. Defaults to <output_dir>/timing_metrics.jsonl.",
+    )
     parser.add_argument(
         "--use-rl-lora",
         action="store_true",
@@ -180,15 +187,109 @@ def load_model_and_tokenizer(args: argparse.Namespace):
     return model, tokenizer
 
 
-class SingleStepRewardFunc:
+class TimingTracker:
     def __init__(self) -> None:
+        self.reset_interval()
+
+    def reset_interval(self) -> None:
+        self.reward_calls = 0
+        self.samples_scored = 0
+        self.reward_wall_seconds = 0.0
+        self.env_step_seconds = 0.0
+        self.sql_exec_seconds = 0.0
+        self.sql_exec_calls = 0
+        self.train_step_wall_seconds = 0.0
+        self.train_step_count = 0
+
+    def add_reward_call(self, *, reward_wall: float, env_step: float, sql_exec: float, samples: int, sql_calls: int) -> None:
+        self.reward_calls += 1
+        self.samples_scored += samples
+        self.reward_wall_seconds += reward_wall
+        self.env_step_seconds += env_step
+        self.sql_exec_seconds += sql_exec
+        self.sql_exec_calls += sql_calls
+
+    def add_train_step(self, wall_seconds: float) -> None:
+        self.train_step_wall_seconds += wall_seconds
+        self.train_step_count += 1
+
+    def build_summary(self) -> Dict[str, float]:
+        avg_train_step_wall = self.train_step_wall_seconds / self.train_step_count if self.train_step_count else 0.0
+        avg_reward_call_wall = self.reward_wall_seconds / self.reward_calls if self.reward_calls else 0.0
+        avg_env_step_wall = self.env_step_seconds / self.samples_scored if self.samples_scored else 0.0
+        avg_sql_exec_wall = self.sql_exec_seconds / self.sql_exec_calls if self.sql_exec_calls else 0.0
+        approx_model_train_wall = max(0.0, self.train_step_wall_seconds - self.reward_wall_seconds)
+        avg_model_train_wall = approx_model_train_wall / self.train_step_count if self.train_step_count else 0.0
+        return {
+            "train_steps": self.train_step_count,
+            "reward_calls": self.reward_calls,
+            "samples_scored": self.samples_scored,
+            "avg_train_step_wall_seconds": round(avg_train_step_wall, 4),
+            "avg_reward_call_wall_seconds": round(avg_reward_call_wall, 4),
+            "avg_env_step_wall_seconds": round(avg_env_step_wall, 4),
+            "avg_sql_exec_wall_seconds": round(avg_sql_exec_wall, 4),
+            "approx_avg_model_generation_and_optimization_seconds": round(avg_model_train_wall, 4),
+        }
+
+
+class TimingCallback(TrainerCallback):
+    def __init__(self, tracker: TimingTracker, log_path: str):
+        self.tracker = tracker
+        self._step_started_at = None
+        self.log_path = Path(log_path)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        self._step_started_at = time.perf_counter()
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self._step_started_at is not None:
+            self.tracker.add_train_step(time.perf_counter() - self._step_started_at)
+            self._step_started_at = None
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        summary = self.tracker.build_summary()
+        chinese_summary = {
+            "训练步数": summary["train_steps"],
+            "奖励函数调用次数": summary["reward_calls"],
+            "打分样本数": summary["samples_scored"],
+            "平均每个训练步总耗时(秒)": summary["avg_train_step_wall_seconds"],
+            "平均每次奖励函数耗时(秒)": summary["avg_reward_call_wall_seconds"],
+            "平均每个环境步骤耗时(秒)": summary["avg_env_step_wall_seconds"],
+            "平均每次SQL执行耗时(秒)": summary["avg_sql_exec_wall_seconds"],
+            "近似模型生成与训练耗时(秒)": summary["approx_avg_model_generation_and_optimization_seconds"],
+        }
+        print("[时间统计]", json.dumps(chinese_summary, ensure_ascii=False))
+        with self.log_path.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "global_step": int(getattr(state, "global_step", 0)),
+                        "timing_summary": chinese_summary,
+                        "raw_summary": summary,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        self.tracker.reset_interval()
+
+
+class SingleStepRewardFunc:
+    def __init__(self, tracker: TimingTracker | None = None) -> None:
         self.env = Text2SQLRLEnv()
+        self.__name__ = "single_step_text2sql_reward"
+        self.tracker = tracker
 
     def __call__(self, prompts: List[str], completions: List[Any], **kwargs: Any) -> List[float]:
+        reward_call_started_at = time.perf_counter()
         rewards: List[float] = []
         seed_payloads = kwargs.get("seed_json", [])
         history_payloads = kwargs.get("history_json", [])
         difficulties = kwargs.get("difficulty", [])
+        env_step_seconds_total = 0.0
+        sql_exec_seconds_total = 0.0
+        sql_exec_calls = 0
 
         for idx, completion in enumerate(completions):
             completion_text = normalize_completion_text(completion)
@@ -199,10 +300,24 @@ class SingleStepRewardFunc:
                 state = self.env.restore_state(seed, history, difficulty=difficulty)
                 step_result = self.env.step(state, completion_text)
                 rewards.append(float(step_result["reward"]))
+                timing_info = step_result.get("timing_info", {})
+                env_step_seconds_total += float(timing_info.get("step_seconds", 0.0) or 0.0)
+                sql_exec_seconds = float(timing_info.get("sql_exec_seconds", 0.0) or 0.0)
+                sql_exec_seconds_total += sql_exec_seconds
+                if step_result.get("action") is not None:
+                    sql_exec_calls += 1
             except Exception as exc:
                 print(f"[reward_func] failed on sample {idx}: {exc}")
                 rewards.append(-2.0)
 
+        if self.tracker is not None:
+            self.tracker.add_reward_call(
+                reward_wall=time.perf_counter() - reward_call_started_at,
+                env_step=env_step_seconds_total,
+                sql_exec=sql_exec_seconds_total,
+                samples=len(completions),
+                sql_calls=sql_exec_calls,
+            )
         return rewards
 
 
@@ -244,8 +359,10 @@ def build_trainer(
     train_dataset: Dataset,
     eval_dataset: Dataset | None,
     training_args: GRPOConfig,
+    timing_log_path: str,
 ):
-    reward_func = SingleStepRewardFunc()
+    tracker = TimingTracker()
+    reward_func = SingleStepRewardFunc(tracker=tracker)
     trainer_kwargs = {
         "model": model,
         "args": training_args,
@@ -255,11 +372,13 @@ def build_trainer(
         "processing_class": tokenizer,
     }
     try:
-        return GRPOTrainer(**trainer_kwargs)
+        trainer = GRPOTrainer(**trainer_kwargs)
     except TypeError:
         trainer_kwargs.pop("processing_class", None)
         trainer_kwargs["tokenizer"] = tokenizer
-        return GRPOTrainer(**trainer_kwargs)
+        trainer = GRPOTrainer(**trainer_kwargs)
+    trainer.add_callback(TimingCallback(tracker, timing_log_path))
+    return trainer
 
 
 def main() -> None:
@@ -279,12 +398,14 @@ def main() -> None:
         eval_dataset = maybe_apply_chat_template(eval_dataset, tokenizer, args.use_chat_template)
 
     training_args = build_training_args(args)
+    timing_log_path = args.timing_log_path or str(output_dir / "timing_metrics.jsonl")
     trainer = build_trainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         training_args=training_args,
+        timing_log_path=timing_log_path,
     )
 
     (output_dir / "run_config.json").write_text(

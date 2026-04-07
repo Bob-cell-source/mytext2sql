@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict
@@ -21,6 +22,7 @@ class SQLEnvironment:
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.max_preview_rows = max_preview_rows
         self.executor = execute_sql_with_pymysql()
+        self.last_execution_seconds = 0.0
 
     @staticmethod
     def _clean_sql(sql_text: str) -> str:
@@ -47,11 +49,13 @@ class SQLEnvironment:
         }
 
     def _execute_internal(self, sql_text: str, turns_left: int, sql_id: str = "") -> tuple[Observation, list[dict]]:
+        started_at = time.perf_counter()
         sql_text = self._clean_sql(sql_text)
         if not sql_text.endswith(";"):
             sql_text += ";"
 
         if not self._is_read_only_query(sql_text):
+            self.last_execution_seconds = time.perf_counter() - started_at
             return {
                 "status": "error",
                 "error_message": "Only a single read-only SELECT/WITH query is allowed.",
@@ -72,6 +76,7 @@ class SQLEnvironment:
         try:
             self.executor.execute_sql_with_pymysql(str(tmp_in), str(tmp_out), db_config=self._db_config())
             if not tmp_out.exists():
+                self.last_execution_seconds = time.perf_counter() - started_at
                 return {
                     "status": "error",
                     "error_message": "SQL executor did not produce an output file.",
@@ -111,6 +116,7 @@ class SQLEnvironment:
             "fingerprint": fingerprint,
             "turns_left": turns_left,
         }
+        self.last_execution_seconds = time.perf_counter() - started_at
         return observation, result_rows
 
     def execute(self, sql_text: str, turns_left: int, sql_id: str = "") -> Observation:

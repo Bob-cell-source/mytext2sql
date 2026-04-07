@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -225,6 +226,7 @@ class Text2SQLRLEnv:
         return "\n\n".join(blocks)
 
     def step(self, state: RLEpisodeState, model_output: str) -> Dict[str, Any]:
+        step_started_at = time.perf_counter()
         if state.done:
             raise RuntimeError("Episode is already done.")
 
@@ -251,6 +253,10 @@ class Text2SQLRLEnv:
                 "reward_breakdown": reward_breakdown,
                 "reward": sum(reward_breakdown.values()),
                 "final_rows": [],
+                "timing_info": {
+                    "step_seconds": time.perf_counter() - step_started_at,
+                    "sql_exec_seconds": 0.0,
+                },
             }
 
         turn_id = state.turn_index
@@ -299,6 +305,10 @@ class Text2SQLRLEnv:
                 "reward_breakdown": reward_breakdown,
                 "reward": sum(reward_breakdown.values()),
                 "final_rows": [],
+                "timing_info": {
+                    "step_seconds": time.perf_counter() - step_started_at,
+                    "sql_exec_seconds": getattr(self.sql_env, "last_execution_seconds", 0.0),
+                },
             }
 
         observation, rows = self.sql_env.execute_with_rows(
@@ -357,4 +367,8 @@ class Text2SQLRLEnv:
             "reward_breakdown": reward_breakdown,
             "reward": sum(reward_breakdown.values()),
             "final_rows": rows if action.action_type == "solution" else [],
+            "timing_info": {
+                "step_seconds": time.perf_counter() - step_started_at,
+                "sql_exec_seconds": getattr(self.sql_env, "last_execution_seconds", 0.0),
+            },
         }

@@ -92,7 +92,6 @@ python3 scripts/train_grpo_trl.py \
   --save-steps 50 \
   --eval-steps 50 \
   --gradient-checkpointing \
-  --use-chat-template
 ```
 
 ### 3.2 已 merge 的 SFT 模型
@@ -118,7 +117,6 @@ python3 scripts/train_grpo_trl.py \
   --save-steps 50 \
   --eval-steps 50 \
   --gradient-checkpointing \
-  --use-chat-template \
   --use-rl-lora \
   --rl-lora-r 64 \
   --rl-lora-alpha 128 \
@@ -297,7 +295,6 @@ python3 scripts/train_grpo_trl.py \
   --save-steps 50 \
   --eval-steps 50 \
   --gradient-checkpointing \
-  --use-chat-template \
   --use-rl-lora \
   --rl-lora-r 64 \
   --rl-lora-alpha 128 \
@@ -371,3 +368,29 @@ python3 scripts/train_grpo_trl.py \
   - `pred_solution_exec_success_rate`
 
 如果这些指标有提升，再继续扩大训练规模或升级到更完整的多步 RL。
+
+## 11. 训练耗时统计
+
+当前 `scripts/train_grpo_trl.py` 已经支持输出中文时间统计，并默认写到：
+
+- `输出目录/timing_metrics.jsonl`
+
+每次到 `logging_steps` 时会记录：
+
+- 平均每个训练步总耗时
+- 平均每次奖励函数耗时
+- 平均每个环境步骤耗时
+- 平均每次 SQL 执行耗时
+- 近似模型生成与训练耗时
+
+如果你想显式指定文件路径，可以传：
+
+```bash
+--timing-log-path saves/grpo/single_step_14b/timing_metrics.jsonl
+```
+
+补充：
+
+- 如果 merged 模型目录里的 tokenizer 没有 `chat_template`
+- 就不要加 `--use-chat-template`
+- 当前仓库默认导出的 `prompt` 已经是完整纯文本，可直接训练
