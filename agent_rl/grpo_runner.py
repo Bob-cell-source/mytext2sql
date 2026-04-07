@@ -20,6 +20,7 @@ class RolloutStep:
     sql: str = ""
     reasoning: str = ""
     observation: Optional[Dict[str, Any]] = None
+    timing_info: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -60,6 +61,7 @@ class GRPORolloutRunner:
                     sql=action.sql if action else "",
                     reasoning=action.reasoning if action else "",
                     observation=observation,
+                    timing_info=step_result.get("timing_info"),
                 )
             )
 

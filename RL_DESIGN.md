@@ -1,6 +1,6 @@
 # RL 设计方案
 
-这份文档用于定义当前项目第一版基于 `Agent 单轮 SFT` 的后续 RL / GRPO 方案。
+这份文档用于定义当前项目基于 `Agent 单轮 SFT` 的后续 RL / GRPO 方案。
 
 目标不是一步到位实现最复杂的 RL 系统，而是先把：
 
@@ -31,71 +31,82 @@ RL 不从 base model 开始，而是从当前已经验证有效的：
 
 ## 1.1 当前采用的 RL 形态
 
-当前仓库第一版并没有直接实现“trainer 内部完整多轮 rollout”的 RL，
-而是采用了一个更稳、更容易落地的方案：
+当前推荐主线已经切到：
+
+- **online multi-turn GRPO**
+- 通过 `rollout_func` 在线生成整条轨迹
+- 从初始 seed 出发，而不是从中间 state 出发
+
+仓库里仍然保留 single-step GRPO 作为旧实验线，用于做对照和兼容。
+
+## 1.1.1 online 版
+
+online 版的训练样本只是一批初始 seed：
+
+- `question`
+- `schema`
+- `knowledge`
+- `difficulty`
+- `gold_sql`
+- `gold_result`
+
+训练时：
+
+1. `env.reset(seed)`
+2. 模型生成第 1 步 action
+3. env 执行并返回 observation
+4. 继续下一轮直到 `<solution>` 或终止
+5. 按整条 episode 计算 reward
+
+这条线更符合当前项目对 agent RL 的目标。
+
+## 1.1.2 single-step 旧版
+
+仓库里也保留了一条更早的 single-step 方案：
 
 - `单步 state -> 单步 action`
 - `reward function` 内重建当前 state
 - 再调用环境做一步 `env.step(...)`
 
-也就是说，当前版本更准确地说是：
-
-- **单步 agent GRPO**
-
-它的目标是先验证：
-
-- reward 是否有效
-- agent 单轮 policy 是否还能继续提升
-- `solution` 质量是否能被 RL 拉起来
-
-这样做的优点是：
-
-- 更容易与 `TRL GRPOTrainer` 直接对接
-- 不需要一开始就实现复杂多轮 trainer
-- 更容易调试 reward 和协议解析
+这条线的优点是简单，缺点是并不真正优化整条多轮策略。
 
 ## 1.2 当前方案与未来多步 agent RL 的区别
 
-### 当前方案：单步 GRPO
+### 当前推荐方案：online rollout_func GRPO
 
 训练样本形式：
 
-- 输入：`state_t`
-- 输出：`action_t`
-- reward：调用环境对 `action_t` 打分
+- 输入：初始 seed
+- 输出：在线 rollout 的整条 episode
+- reward：按整条 episode 汇总
 
 特点：
 
-- 最适合当前这版 `Agent 单轮 SFT` 冷启动
-- 不需要注册 tools
-- 不需要 OpenEnv
-- 也不需要处理 vLLM 训练-推理精度不一致下的重要性采样修正
+- 最贴合当前 `<reasoning>/<sql>/<solution>` 协议
+- 最大化复用现有 env / reward / SQL 执行逻辑
+- 不需要先把项目改造成标准 tool calling
 
 适用阶段：
 
-- 第一版验证 RL 是否有增益
-- 第一版验证 reward 设计是否合理
+- 当前主线
 
-### 未来方案：多步 OpenEnv / rollout_func GRPO
+### 未来方案：OpenEnv
 
-如果后面要做真正的多轮 agent RL，更像这样：
+如果后面愿意进一步按 TRL 的环境范式重构，则可以走 OpenEnv：
 
-- trainer 内部逐轮生成 action
-- env 执行 SQL
-- 返回 observation
-- 再进入下一轮
-- 直到 `<solution>` 或 episode 终止
+- 把环境交给 TRL 管理
+- 更接近官方 agent 训练接口
+- 但要求更贴近环境方法 / tools 规范
 
 这时更适合：
 
-- `rollout_func`
-- 或者 `TRL` 的 `OpenEnv` 集成
+- `TRL` 的 `OpenEnv` 集成
 
 特点：
 
-- 更接近真正的 agent 训练
-- 能直接优化整条 episode 行为
-- 更适合研究多轮探索与自纠
+- 更官方
+- 更规范
+- 但需要更多重构
 
 代价：
 
@@ -110,9 +121,9 @@ RL 不从 base model 开始，而是从当前已经验证有效的：
 
 当前推荐路线是：
 
-1. 先把 **单步 GRPO** 跑通
+1. 先把 **online rollout_func GRPO** 跑通
 2. 先看核心任务指标是否提升
-3. 如果单步 GRPO 已经证明有效，再考虑升级成真正多步 agent RL
+3. 如果 online 版已经稳定，再考虑是否进一步迁移到 OpenEnv
 
 也就是说：
 
@@ -172,46 +183,57 @@ RL 不从 base model 开始，而是从当前已经验证有效的：
 - 本地 smoke test
 - 调试 reward / prompt / step 逻辑
 
-### 数据准备
+### online 主线数据准备
 
-- `scripts/prepare_grpo_dataset.py`
+- `scripts/prepare_online_grpo_seeds.py`
 
 作用：
 
-- 从 `output/llamafactory_sft_v5/train_full_trajectory.json`
-  和 `val_full_trajectory.json`
-  恢复出单步 RL 样本
-- 把完整轨迹拆成：
-  - 当前 `prompt`
-  - 当前 `history`
-  - 当前 `seed`
-  - 当前 gold action
+- 直接从全部 gold seeds 划分 train / val
+- 可选把 synthetic / Dataflow 数据并入 train
+- 验证集保持 gold-only
+- 输出：
+  - `output/rl_seed_pool_v2/train_rl_seeds.json`
+  - `output/rl_seed_pool_v2/val_rl_seeds.json`
 
-输出：
+### online rollout
 
-- `output/rl_training_inputs_v1/train_rl_single_step.json`
-- `output/rl_training_inputs_v1/val_rl_single_step.json`
+- `agent_rl/online_rollout.py`
 
-注意：
+作用：
 
-- 这一步产出的不是 “GRPO 生成结果”
-- 而是从现有 `SFT` 轨迹整理出的 **RL 训练输入数据**
+- 从初始 seed 开始跑整条多轮 episode
+- 每轮构造 prompt、生成、执行 SQL、接 observation
+- 返回：
+  - `prompt_ids`
+  - `completion_ids`
+  - `logprobs`
+  - `env_reward`
+  - episode 级调试信息
 
-这一步的目标，是给 `TRL GRPOTrainer` 提供可直接消费的单步 RL 数据。
+### online 训练入口
 
-### 训练入口
-
-- `scripts/train_grpo_trl.py`
+- `scripts/train_grpo_online_trl.py`
 
 作用：
 
 - 加载 base model
 - 可选加载已经训练好的 SFT adapter 作为 RL 初始化
-- 读取 `prepare_grpo_dataset.py` 导出的数据
-- 构建 `GRPOTrainer`
-- 在 reward function 里调用当前 env 做单步打分
+- 读取 `prepare_online_grpo_seeds.py` 导出的 seed 池
+- 构建 `rollout_func`
+- 用 `TRL GRPOTrainer` 训练在线多轮策略
 
-这是当前第一版 RL 训练主入口。
+这是当前推荐主入口。
+
+### single-step 旧版
+
+- `scripts/prepare_grpo_dataset.py`
+- `scripts/train_grpo_trl.py`
+
+保留用途：
+
+- 旧实验复现
+- 和 online 版做对照
 
 ### 文档
 

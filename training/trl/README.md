@@ -1,28 +1,217 @@
 # TRL / GRPO 训练说明
 
-本目录对应当前项目第一版基于 `Agent 单轮 SFT` 的后续 RL 训练方案。
+本目录现在维护两条 RL 路线：
 
-当前实现采用：
+1. **online multi-turn GRPO**
+   - 当前推荐主线
+   - 从初始题目 seed 出发
+   - 通过 `rollout_func` 在线 rollout 整条轨迹
+2. **single-step GRPO**
+   - 旧版兼容方案
+   - 从中间 state pool 训练“下一步动作”
 
-- `单步 state -> 单步 action`
-- `TRL GRPOTrainer`
-- `14B 基座 + 已训练好的 SFT adapter`
+当前更推荐第一条，因为它更符合你这个项目的 agent RL 目标。
 
-而不是一上来就做完整多步自定义 trainer。
+## 0. 在线版和单步版的区别
 
-这样做的目的，是先验证：
+### online multi-turn GRPO
 
-- reward 是否有方向性
-- 单轮 agent policy 是否还能继续提升
-- `result_match_rate` 和 `pred_solution_exec_success_rate` 是否能被 GRPO 推上去
+- 输入：初始 seed 池
+- 训练时：模型自己从 turn1 开始一步步生成
+- 环境：真实执行 SQL，返回 observation
+- 优化目标：整条 episode 的 reward
 
-注意：
+核心脚本：
 
-- `prepare_grpo_dataset.py` 产出的不是 “GRPO 生成数据”
-- 它只是把现有 `SFT` 多轮轨迹整理成 **RL 训练输入数据**
-- 所以输出目录统一命名为 `rl_training_inputs_*`，避免和训练产物或 rollout 结果混淆
+- `scripts/prepare_online_grpo_seeds.py`
+- `agent_rl/online_rollout.py`
+- `scripts/train_grpo_online_trl.py`
 
-## 1. 先准备 GRPO 数据
+### single-step GRPO
+
+- 输入：从 SFT 多轮轨迹恢复出来的中间 state
+- 训练时：模型只生成当前一步 action
+- 优化目标：局部 action reward
+
+核心脚本：
+
+- `scripts/prepare_grpo_dataset.py`
+- `scripts/train_grpo_trl.py`
+
+如果你只是想继续复现实验，single-step 版还能用；如果你想更贴近真正的 agent RL，优先看 online 版。
+
+## 1. 先准备 online seed 池
+
+online 版不再准备中间 state，而是只保留初始题目 seed。
+
+执行：
+
+```bash
+python3 scripts/prepare_online_grpo_seeds.py \
+  --golden-path golden_sql_marked.json \
+  --schema-path schema.json \
+  --outdir output/rl_seed_pool_v2
+```
+
+输出：
+
+- `output/rl_seed_pool_v2/train_rl_seeds.json`
+- `output/rl_seed_pool_v2/val_rl_seeds.json`
+- `output/rl_seed_pool_v2/prepare_report.json`
+
+每条样本只保留：
+
+- `seed_id`
+- 初始 `prompt`
+- `difficulty`
+- `seed_json`
+- `gold_sql`
+- `gold_result_json`
+
+当前默认会直接从全部 gold seeds 划分：
+
+- train: 58
+- val: 14
+
+验证集保持 `gold-only`。
+
+如果你只是想先做方法可行性验证，也可以直接：
+
+```bash
+python3 scripts/prepare_online_grpo_seeds.py \
+  --golden-path golden_sql_marked.json \
+  --schema-path schema.json \
+  --val-ratio 0 \
+  --outdir output/rl_seed_pool_v2_all_gold
+```
+
+这时会得到：
+
+- train = 全量 gold
+- val = 0
+
+这种设定适合做 sanity check，看 online GRPO 是否能在训练集内把策略往正确方向推；不适合作为正式泛化结论。
+
+如果你要把合成 / Dataflow 数据并入训练池，可以加：
+
+```bash
+python3 scripts/prepare_online_grpo_seeds.py \
+  --golden-path golden_sql_marked.json \
+  --schema-path schema.json \
+  --synthetic-path output/dataflow_evalsets/tgac_step9_eval.json \
+  --outdir output/rl_seed_pool_v2_aug
+```
+
+此时：
+
+- train = gold train + synthetic train
+- val = 仍然只用 gold val
+
+## 2. online multi-turn GRPO 启动命令
+
+### 2.1 已 merge 的 SFT 模型
+
+如果你已经把 `SFT` 结果 merge 成完整模型目录，推荐这样启动：
+
+```bash
+python3 scripts/train_grpo_online_trl.py \
+  --base-model-path /path/to/merged_sft_model \
+  --train-dataset-path output/rl_seed_pool_v2/train_rl_seeds.json \
+  --eval-dataset-path output/rl_seed_pool_v2/val_rl_seeds.json \
+  --output-dir saves/grpo_online/online_14b \
+  --dtype bf16 \
+  --trust-remote-code \
+  --per-device-train-batch-size 1 \
+  --gradient-accumulation-steps 4 \
+  --learning-rate 5e-6 \
+  --num-train-epochs 1 \
+  --num-generations 2 \
+  --max-prompt-length 3072 \
+  --max-completion-length 512 \
+  --logging-steps 5 \
+  --save-steps 50 \
+  --eval-steps 50 \
+  --gradient-checkpointing \
+  --use-rl-lora \
+  --rl-lora-r 64 \
+  --rl-lora-alpha 128 \
+  --rl-lora-dropout 0.05 \
+  --rl-lora-target-modules all-linear
+```
+
+### 2.2 未 merge 的 SFT 模型
+
+如果你手上还是：
+
+- `base model`
+- `SFT adapter`
+
+可以这样启动：
+
+```bash
+python3 scripts/train_grpo_online_trl.py \
+  --base-model-path /path/to/base_model \
+  --sft-adapter-path /path/to/sft_adapter \
+  --train-dataset-path output/rl_seed_pool_v2/train_rl_seeds.json \
+  --eval-dataset-path output/rl_seed_pool_v2/val_rl_seeds.json \
+  --output-dir saves/grpo_online/online_14b \
+  --dtype bf16 \
+  --trust-remote-code \
+  --per-device-train-batch-size 1 \
+  --gradient-accumulation-steps 4 \
+  --learning-rate 5e-6 \
+  --num-train-epochs 1 \
+  --num-generations 2 \
+  --max-prompt-length 3072 \
+  --max-completion-length 512 \
+  --logging-steps 5 \
+  --save-steps 50 \
+  --eval-steps 50 \
+  --gradient-checkpointing
+```
+
+说明：
+
+- 这版训练依赖 TRL 的 `rollout_func`
+- 训练时不再使用静态中间 state pool
+- reward 直接来自整条 episode 的在线 rollout
+
+## 3. online 版的核心代码
+
+- `agent_rl/online_rollout.py`
+
+作用：
+
+- 从初始 seed 开始在线 rollout
+- 每一轮构造 prompt
+- 调模型生成 completion
+- 调 `Text2SQLRLEnv.step(...)` 执行 SQL
+- 聚合整条 episode 的 token、logprobs 和 env reward
+
+- `scripts/train_grpo_online_trl.py`
+
+作用：
+
+- 读取初始 seed 池
+- 构造 `rollout_func`
+- 将在线 rollout 结果接入 `GRPOTrainer`
+- 记录中文时间统计
+
+## 4. 旧版 single-step GRPO
+
+下面这些仍然保留，但现在是旧方案：
+
+- `scripts/prepare_grpo_dataset.py`
+- `scripts/train_grpo_trl.py`
+- `output/rl_training_inputs_v1/`
+
+这条线的好处是更容易先跑通；缺点是训练目标是局部 action，不是完整 episode。
+
+---
+
+以下内容保留给 single-step 方案与通用说明。
+
+## 5. 先准备 single-step GRPO 数据
 
 GRPO 数据来自 `v5` 的整体轨迹数据，但会被拆成单步 RL 样本。
 
@@ -51,7 +240,7 @@ python3 scripts/prepare_grpo_dataset.py \
 - `output/rl_training_inputs_v1/val_rl_single_step.json`
 - `output/rl_training_inputs_v1/prepare_report.json`
 
-## 2. 推荐的第一版训练方式
+## 6. 推荐的第一版训练方式
 
 第一版建议：
 
@@ -61,7 +250,7 @@ python3 scripts/prepare_grpo_dataset.py \
   - 推荐在 merged 模型上再挂一个新的 `RL LoRA adapter`
 - 不要同卡再挂 `vLLM`
 
-## 3. 推荐启动命令
+## 7. 推荐启动命令
 
 ### 3.1 未 merge 的 SFT 模型
 
@@ -130,7 +319,7 @@ python3 scripts/train_grpo_trl.py \
 - `--use-rl-lora` 表示在 merged 的 SFT 模型上再挂一层新的 RL LoRA adapter
 - 这样比“直接训练 merge 后全模型”更稳，也更省显存
 
-## 4. 参数建议
+## 8. 参数建议
 
 对你现在的 `14B + RTX PRO 6000 96GB`，第一版建议：
 
@@ -146,7 +335,7 @@ python3 scripts/train_grpo_trl.py \
 - 上很长 context
 - 同时在同一张卡上跑 vLLM 和训练
 
-## 5. 当前 reward 逻辑
+## 9. 当前 reward 逻辑
 
 当前 reward 由 `agent_rl/reward.py` 和 `agent_rl/rl_env.py` 决定，核心是：
 
@@ -157,7 +346,7 @@ python3 scripts/train_grpo_trl.py \
 - 协议错误：终止并惩罚
 - 最后一轮仍输出 `<sql>`：按 final failure 处理
 
-## 6. 当前方案的边界
+## 10. 当前方案的边界
 
 这版不是“真正多步 end-to-end policy optimization trainer”，而是：
 
@@ -172,7 +361,7 @@ python3 scripts/train_grpo_trl.py \
 
 - 一上来追求最复杂的 multi-step on-policy agent RL
 
-## 7. 训练后建议
+## 11. 训练后建议
 
 训练后优先比较：
 
@@ -183,7 +372,7 @@ python3 scripts/train_grpo_trl.py \
 
 如果这些指标相对当前 `Agent 单轮 SFT` 有提升，再继续扩大 GRPO 训练规模。
 
-## 7.1 训练后怎么评估 GRPO 模型
+## 11.1 训练后怎么评估 GRPO 模型
 
 建议分成两层。
 
@@ -252,7 +441,7 @@ python3 scripts/evaluate_agent_rollout.py \
 
 建议先做第一层，再做第二层。
 
-## 8. 服务器环境准备
+## 12. 服务器环境准备
 
 如果你要在远端服务器上运行这套 GRPO 代码，建议按下面顺序准备。
 
