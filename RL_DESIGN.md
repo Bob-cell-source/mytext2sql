@@ -302,6 +302,74 @@ online 版的训练样本只是一批初始 seed：
    - 组内 reward 标准差
    - 组内 reward 零方差比例
 
+### 当前 online 实现如何满足这点
+
+当前 online 版不是：
+
+- 先 rollout 一次
+- 再把同一个 reward 复制给同组多个 generation
+
+而是：
+
+1. 对同一个 seed，按 `num_generations` 初始化多条独立 episode state
+2. 在每一轮 turn 上，对这些 state 的当前 prompt 做一次**批量 generate**
+3. 每条 generation 的输出分别送入各自的 `env.step(...)`
+4. 每条 generation 独立更新自己的：
+   - history
+   - observation
+   - remaining turns
+   - reward accumulation
+5. 直到每条 generation 各自终止
+6. 最后每条 generation 各自汇总成一个 episode reward
+
+### 当前 online 版是怎么做“并行生成”的
+
+这里的“并行”不是多进程同时各跑一条轨迹，而是：
+
+- **同一个 seed 的多个 generation，在同一轮 turn 上做 batched generate**
+
+具体过程是：
+
+1. 为同一个 seed 初始化 `num_generations` 条独立 state
+2. 找出当前还未终止的那些 state
+3. 对这些 active state：
+   - 分别构造当前轮的 prompt
+   - 把这些 prompt 组成一个 batch
+4. 调用一次 batched `model.generate(...)`
+5. 将 batch 中的每条输出分别映射回对应 state
+6. 对每条输出分别执行：
+   - 协议解析
+   - SQL 执行
+   - observation 更新
+   - reward 更新
+7. 进入下一轮，只对仍未终止的 state 再做下一次 batched generate
+
+因此当前 online 版的生成流程更像：
+
+- turn 1: generation_1/2/3/4 一起生成
+- turn 1: 各自执行 SQL 并更新状态
+- turn 2: 还没结束的那些 generation 再一起生成
+- turn 2: 各自执行 SQL 并更新状态
+- ...
+
+这样做的好处是：
+
+- 比“一条 generation 跑到底，再跑下一条”更能利用 GPU
+- 同组 generation 的比较关系更自然
+- 仍然保持每条 generation 的独立 episode 语义
+
+因此：
+
+- reward 仍然是 episode 级别
+- 但 episode 是逐 generation 独立的
+- 同组内的 reward 差异来自：
+  - 不同生成的 probe 路径
+  - 不同执行结果
+  - 不同终止轮数
+  - 不同最终 SQL / result match
+
+这正是当前 online 版比之前单步版更符合 GRPO 思想的地方。
+
 如果大量组的 reward 方差为 0，说明当前 reward 设计过于稀疏，或者 rollout 没有真正产生行为差异，需要继续调整。
 
 ## 3. Observation 定义

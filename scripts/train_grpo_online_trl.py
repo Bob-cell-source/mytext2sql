@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from agent_rl.online_rollout import extract_seed_id_from_prompt, rollout_once
+from agent_rl.online_rollout import extract_seed_id_from_prompt, rollout_many_for_seed
 from agent_rl.rl_env import Text2SQLRLEnv
 
 
@@ -390,13 +390,14 @@ def build_rollout_func(
             seed_id = extract_seed_id_from_prompt(prompt)
             seed = seed_by_id[seed_id]
             group_rewards: List[float] = []
-            for _ in range(num_generations):
-                episode = rollout_once(
-                    trainer=trainer,
-                    env=env,
-                    seed=seed,
-                    use_chat_template=use_chat_template,
-                )
+            episodes = rollout_many_for_seed(
+                trainer=trainer,
+                env=env,
+                seed=seed,
+                num_generations=num_generations,
+                use_chat_template=use_chat_template,
+            )
+            for episode in episodes:
                 prompt_ids_batch.append(episode["prompt_ids"])
                 completion_ids_batch.append(episode["completion_ids"])
                 logprobs_batch.append(episode["logprobs"])

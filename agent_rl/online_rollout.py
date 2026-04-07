@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 import torch
 
-from agent_rl.grpo_runner import RolloutEpisode, GRPORolloutRunner
+from agent_rl.grpo_runner import RolloutEpisode, RolloutStep
 from agent_rl.rl_env import Text2SQLRLEnv
 from agent_rl.schemas import SeedRecord
 
@@ -67,30 +67,42 @@ def _get_model_device(model: Any) -> torch.device:
     return next(model.parameters()).device
 
 
-def _compute_completion_logprobs(model: Any, input_ids: torch.Tensor, prompt_len: int) -> List[float]:
-    if input_ids.shape[1] <= prompt_len:
-        return []
+def _compute_batched_completion_logprobs(model: Any, sequences: torch.Tensor, prompt_seq_len: int) -> List[List[float]]:
+    if sequences.shape[1] <= prompt_seq_len:
+        return [[] for _ in range(sequences.shape[0])]
     with torch.no_grad():
-        outputs = model(input_ids=input_ids)
+        outputs = model(input_ids=sequences)
         logits = outputs.logits[:, :-1, :]
-        target_ids = input_ids[:, 1:]
+        target_ids = sequences[:, 1:]
         log_probs = torch.log_softmax(logits, dim=-1)
         token_log_probs = log_probs.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
-        start = max(prompt_len - 1, 0)
-        return token_log_probs[0, start:].detach().cpu().tolist()
+        start = max(prompt_seq_len - 1, 0)
+        rows: List[List[float]] = []
+        for row_idx in range(sequences.shape[0]):
+            rows.append(token_log_probs[row_idx, start:].detach().cpu().tolist())
+        return rows
 
 
-def generate_completion_with_model(trainer: Any, prompt_text: str) -> Dict[str, Any]:
+def generate_completions_with_model(trainer: Any, prompt_texts: List[str]) -> List[Dict[str, Any]]:
     tokenizer = _get_tokenizer(trainer)
     model = trainer.model
     device = _get_model_device(model)
-    encoded = tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False)
+    args = trainer.args
+    tokenizer_kwargs = {
+        "return_tensors": "pt",
+        "padding": True,
+        "truncation": True,
+        "add_special_tokens": False,
+    }
+    max_prompt_length = getattr(args, "max_prompt_length", None)
+    if max_prompt_length:
+        tokenizer_kwargs["max_length"] = int(max_prompt_length)
+    encoded = tokenizer(prompt_texts, **tokenizer_kwargs)
     input_ids = encoded["input_ids"].to(device)
     attention_mask = encoded.get("attention_mask")
     if attention_mask is not None:
         attention_mask = attention_mask.to(device)
 
-    args = trainer.args
     generate_kwargs = {
         "max_new_tokens": int(getattr(args, "max_completion_length", 512)),
         "do_sample": True,
@@ -110,83 +122,136 @@ def generate_completion_with_model(trainer: Any, prompt_text: str) -> Dict[str, 
             **generate_kwargs,
         )
 
-    prompt_len = input_ids.shape[1]
-    completion_ids = output_ids[0, prompt_len:].detach().cpu().tolist()
-    prompt_ids = input_ids[0].detach().cpu().tolist()
-    completion_text = tokenizer.decode(completion_ids, skip_special_tokens=True)
-    logprobs = _compute_completion_logprobs(model, output_ids[:, :], prompt_len)
-    return {
-        "prompt_ids": prompt_ids,
-        "completion_ids": completion_ids,
-        "logprobs": logprobs,
-        "text": completion_text,
-    }
+    prompt_seq_len = input_ids.shape[1]
+    all_logprobs = _compute_batched_completion_logprobs(model, output_ids[:, :], prompt_seq_len)
+    results: List[Dict[str, Any]] = []
+    for row_idx in range(output_ids.shape[0]):
+        prompt_token_count = int(attention_mask[row_idx].sum().item()) if attention_mask is not None else prompt_seq_len
+        prompt_ids = input_ids[row_idx, :prompt_token_count].detach().cpu().tolist()
+        completion_ids = output_ids[row_idx, prompt_seq_len:].detach().cpu().tolist()
+        completion_text = tokenizer.decode(completion_ids, skip_special_tokens=True)
+        results.append(
+            {
+                "prompt_ids": prompt_ids,
+                "completion_ids": completion_ids,
+                "logprobs": all_logprobs[row_idx][: len(completion_ids)],
+                "text": completion_text,
+            }
+        )
+    return results
 
 
-def rollout_once(
+def rollout_many_for_seed(
     *,
     trainer: Any,
     env: Text2SQLRLEnv,
     seed: SeedRecord,
+    num_generations: int,
     use_chat_template: bool = False,
-) -> Dict[str, Any]:
+) -> List[Dict[str, Any]]:
     tokenizer = _get_tokenizer(trainer)
-    runner = GRPORolloutRunner(env)
-    state = env.reset(seed)
+    states = [env.reset(seed) for _ in range(num_generations)]
     system_prompt = env.build_system_prompt()
-
-    all_prompt_ids: List[int] = []
-    all_completion_ids: List[int] = []
-    all_logprobs: List[float] = []
-    generation_seconds = 0.0
-    env_step_seconds = 0.0
-    sql_exec_seconds = 0.0
-
-    def _policy_fn(_: str, __: str, current_state) -> str:
-        nonlocal generation_seconds
-        prompt_text = render_prompt_text(
-            seed_id=seed["seed_id"],
-            system_prompt=system_prompt,
-            user_prompt=env.build_user_prompt(current_state),
-            tokenizer=tokenizer,
-            use_chat_template=use_chat_template,
+    trajectories: List[Dict[str, Any]] = []
+    for _ in range(num_generations):
+        trajectories.append(
+            {
+                "prompt_ids": [],
+                "completion_ids": [],
+                "logprobs": [],
+                "steps": [],
+                "generation_seconds": 0.0,
+                "env_step_seconds": 0.0,
+                "sql_exec_seconds": 0.0,
+            }
         )
+
+    rollout_started_at = time.perf_counter()
+    while True:
+        active_indices = [idx for idx, state in enumerate(states) if not state.done]
+        if not active_indices:
+            break
+
+        prompt_texts: List[str] = []
+        user_prompts: List[str] = []
+        for idx in active_indices:
+            user_prompt = env.build_user_prompt(states[idx])
+            user_prompts.append(user_prompt)
+            prompt_texts.append(
+                render_prompt_text(
+                    seed_id=seed["seed_id"],
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    tokenizer=tokenizer,
+                    use_chat_template=use_chat_template,
+                )
+            )
+
         started = time.perf_counter()
-        generated = generate_completion_with_model(trainer, prompt_text)
-        generation_seconds += time.perf_counter() - started
-        all_prompt_ids.extend(generated["prompt_ids"])
-        all_completion_ids.extend(generated["completion_ids"])
-        all_logprobs.extend(generated["logprobs"])
-        return generated["text"]
+        generated_batch = generate_completions_with_model(trainer, prompt_texts)
+        batch_generation_seconds = time.perf_counter() - started
 
-    started = time.perf_counter()
-    episode: RolloutEpisode = runner.rollout_seed(seed, _policy_fn)
-    rollout_seconds = time.perf_counter() - started
+        for active_pos, state_idx in enumerate(active_indices):
+            generated = generated_batch[active_pos]
+            traj = trajectories[state_idx]
+            traj["generation_seconds"] += batch_generation_seconds / max(1, len(active_indices))
+            traj["prompt_ids"].extend(generated["prompt_ids"])
+            traj["completion_ids"].extend(generated["completion_ids"])
+            traj["logprobs"].extend(generated["logprobs"])
 
-    for step in episode.steps:
-        timing_info = step.timing_info or {}
-        if timing_info:
-            env_step_seconds += float(timing_info.get("step_seconds", 0.0) or 0.0)
-            sql_exec_seconds += float(timing_info.get("sql_exec_seconds", 0.0) or 0.0)
+            step_result = env.step(states[state_idx], generated["text"])
+            timing_info = step_result.get("timing_info", {}) or {}
+            traj["env_step_seconds"] += float(timing_info.get("step_seconds", 0.0) or 0.0)
+            traj["sql_exec_seconds"] += float(timing_info.get("sql_exec_seconds", 0.0) or 0.0)
+            action = step_result["action"]
+            observation = step_result["observation"]
+            traj["steps"].append(
+                RolloutStep(
+                    turn_id=states[state_idx].history[-1].turn_id if states[state_idx].history else len(traj["steps"]) + 1,
+                    prompt=user_prompts[active_pos],
+                    completion=generated["text"],
+                    reward=step_result["reward"],
+                    reward_breakdown=step_result["reward_breakdown"],
+                    done=step_result["done"],
+                    action_type=action.action_type if action else None,
+                    sql=action.sql if action else "",
+                    reasoning=action.reasoning if action else "",
+                    observation=observation,
+                    timing_info=timing_info,
+                )
+            )
 
-    final_result_match = False
-    if episode.steps:
-        last_step = episode.steps[-1]
-        final_result_match = bool(last_step.reward_breakdown.get("r_final_result", 0.0) > 0)
-
-    return {
-        "prompt_ids": all_prompt_ids,
-        "completion_ids": all_completion_ids,
-        "logprobs": all_logprobs,
-        "env_reward": float(episode.total_reward),
-        "seed_id": seed["seed_id"],
-        "difficulty": episode.difficulty,
-        "turn_count": len(episode.steps),
-        "final_failure_reason": episode.final_failure_reason,
-        "final_result_match": final_result_match,
-        "rollout_seconds": rollout_seconds,
-        "generation_seconds": generation_seconds,
-        "env_step_seconds": env_step_seconds,
-        "sql_exec_seconds": sql_exec_seconds,
-        "episode_json": json.dumps(asdict(episode), ensure_ascii=False),
-    }
+    rollout_seconds = time.perf_counter() - rollout_started_at
+    results: List[Dict[str, Any]] = []
+    for idx, state in enumerate(states):
+        steps = trajectories[idx]["steps"]
+        episode = RolloutEpisode(
+            seed_id=seed["seed_id"],
+            difficulty=state.difficulty,
+            total_reward=sum(step.reward for step in steps),
+            done=state.done,
+            final_failure_reason=state.final_failure_reason,
+            steps=steps,
+        )
+        final_result_match = False
+        if steps:
+            final_result_match = bool(steps[-1].reward_breakdown.get("r_final_result", 0.0) > 0)
+        results.append(
+            {
+                "prompt_ids": trajectories[idx]["prompt_ids"],
+                "completion_ids": trajectories[idx]["completion_ids"],
+                "logprobs": trajectories[idx]["logprobs"],
+                "env_reward": float(episode.total_reward),
+                "seed_id": seed["seed_id"],
+                "difficulty": episode.difficulty,
+                "turn_count": len(episode.steps),
+                "final_failure_reason": episode.final_failure_reason,
+                "final_result_match": final_result_match,
+                "rollout_seconds": rollout_seconds / max(1, num_generations),
+                "generation_seconds": trajectories[idx]["generation_seconds"],
+                "env_step_seconds": trajectories[idx]["env_step_seconds"],
+                "sql_exec_seconds": trajectories[idx]["sql_exec_seconds"],
+                "episode_json": json.dumps(asdict(episode), ensure_ascii=False),
+            }
+        )
+    return results

@@ -184,9 +184,46 @@ python3 scripts/train_grpo_online_trl.py \
 
 - 从初始 seed 开始在线 rollout
 - 每一轮构造 prompt
-- 调模型生成 completion
+- 对同一个 seed 的多个 generation 按 turn **批量 generate**
 - 调 `Text2SQLRLEnv.step(...)` 执行 SQL
 - 聚合整条 episode 的 token、logprobs 和 env reward
+
+关键点：
+
+- reward 仍然是 **episode 级**
+- 但每个 generation 都有自己的独立 episode
+- 不会把同一个 seed 的多个 generation 共享成同一个 reward
+- 训练时会额外统计：
+  - `组内reward标准差均值`
+  - `组内reward零方差比例`
+
+这两个指标用来检查组内 reward 是否真的有区分度。
+
+### online 版里的“并行生成”是什么意思
+
+当前 online 版不是：
+
+- 先把 generation_1 整条轨迹跑完
+- 再跑 generation_2
+- 再跑 generation_3
+
+而是采用：
+
+- **按 turn 批量生成**
+
+具体来说：
+
+1. 同一个 seed 下先初始化 `num_generations` 条独立轨迹
+2. 在当前 turn，把这些轨迹的 prompt 组成一个 batch
+3. 用一次 batched `generate` 同时生成这些轨迹当前轮的输出
+4. 再分别对这些输出执行 SQL、更新 observation 和 state
+5. 下一轮只对仍未结束的轨迹继续 batched generate
+
+这样相较于完全串行 rollout：
+
+- GPU 利用率更高
+- 在线训练速度更合理
+- 同时不破坏“每条 generation 都是独立 episode”的语义
 
 - `scripts/train_grpo_online_trl.py`
 
