@@ -116,8 +116,8 @@ def generate_completions_with_model(trainer: Any, prompt_texts: List[str]) -> Li
     generate_kwargs = {
         "max_new_tokens": int(getattr(args, "max_completion_length", 512)),
         "do_sample": True,
-        "temperature": float(getattr(args, "temperature", 1.0) or 1.0),
-        "top_p": float(getattr(args, "top_p", 1.0) or 1.0),
+        "temperature": float(getattr(args, "temperature", 0.7) or 0.7),
+        "top_p": float(getattr(args, "top_p", 0.8) or 0.8),
         "pad_token_id": tokenizer.pad_token_id,
         "eos_token_id": tokenizer.eos_token_id,
     }
@@ -125,15 +125,21 @@ def generate_completions_with_model(trainer: Any, prompt_texts: List[str]) -> Li
     if repetition_penalty:
         generate_kwargs["repetition_penalty"] = repetition_penalty
 
-    with torch.no_grad():
-        output_ids = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            **generate_kwargs,
-        )
+    was_training = bool(getattr(model, "training", False))
+    model.eval()
+    try:
+        with torch.no_grad():
+            output_ids = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **generate_kwargs,
+            )
 
-    prompt_seq_len = input_ids.shape[1]
-    all_logprobs = _compute_batched_completion_logprobs(model, output_ids[:, :], prompt_seq_len)
+        prompt_seq_len = input_ids.shape[1]
+        all_logprobs = _compute_batched_completion_logprobs(model, output_ids[:, :], prompt_seq_len)
+    finally:
+        if was_training:
+            model.train()
     results: List[Dict[str, Any]] = []
     for row_idx in range(output_ids.shape[0]):
         prompt_token_count = int(attention_mask[row_idx].sum().item()) if attention_mask is not None else prompt_seq_len
@@ -142,6 +148,7 @@ def generate_completions_with_model(trainer: Any, prompt_texts: List[str]) -> Li
         completion_text = tokenizer.decode(completion_ids, skip_special_tokens=True)
         results.append(
             {
+                "prompt_text": prompt_texts[row_idx],
                 "prompt_ids": prompt_ids,
                 "completion_ids": completion_ids,
                 "logprobs": all_logprobs[row_idx][: len(completion_ids)],
@@ -225,7 +232,7 @@ def rollout_many_for_seed(
             traj["steps"].append(
                 RolloutStep(
                     turn_id=states[state_idx].history[-1].turn_id if states[state_idx].history else len(traj["steps"]) + 1,
-                    prompt=user_prompts[active_pos],
+                    prompt=generated["prompt_text"],
                     completion=generated["text"],
                     reward=step_result["reward"],
                     reward_breakdown=step_result["reward_breakdown"],
