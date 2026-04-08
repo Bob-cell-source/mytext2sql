@@ -39,16 +39,26 @@ def render_prompt_text(
     tokenizer: Any,
     use_chat_template: bool,
 ) -> str:
+    user_content = f"[seed_id={seed_id}]\n{user_prompt}"
     if use_chat_template and hasattr(tokenizer, "apply_chat_template") and getattr(tokenizer, "chat_template", None):
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"[seed_id={seed_id}]\n{user_prompt}"},
+            {"role": "user", "content": user_content},
         ]
         return tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
         )
+    tokenizer_name = str(getattr(tokenizer, "name_or_path", "") or "").lower()
+    tokenizer_class = str(getattr(tokenizer, "__class__", type("", (), {})).__name__).lower()
+    if "qwen" in tokenizer_name or "qwen" in tokenizer_class:
+        parts = [
+            f"<|im_start|>system\n{system_prompt}<|im_end|>",
+            f"<|im_start|>user\n{user_content}<|im_end|>",
+            "<|im_start|>assistant\n",
+        ]
+        return "\n".join(parts)
     return render_initial_plain_prompt(seed_id, system_prompt, user_prompt)
 
 

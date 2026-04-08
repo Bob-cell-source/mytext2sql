@@ -5,7 +5,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 from datasets import Dataset
@@ -28,6 +28,87 @@ DTYPE_MAP = {
     "fp16": torch.float16,
     "fp32": torch.float32,
 }
+
+
+def _bytes_to_gib(value: int) -> float:
+    return round(float(value) / (1024 ** 3), 4)
+
+
+def _estimate_param_bytes(model: Any, *, trainable_only: Optional[bool] = None) -> int:
+    total = 0
+    for param in model.parameters():
+        if trainable_only is True and not param.requires_grad:
+            continue
+        if trainable_only is False and param.requires_grad:
+            continue
+        total += param.numel() * param.element_size()
+    return total
+
+
+def _estimate_grad_bytes(model: Any) -> int:
+    total = 0
+    for param in model.parameters():
+        if param.grad is None:
+            continue
+        total += param.grad.numel() * param.grad.element_size()
+    return total
+
+
+def _estimate_optimizer_state_bytes(optimizer: Any) -> int:
+    if optimizer is None:
+        return 0
+    total = 0
+    for state in optimizer.state.values():
+        if isinstance(state, dict):
+            for value in state.values():
+                if torch.is_tensor(value):
+                    total += value.numel() * value.element_size()
+    return total
+
+
+def _build_cuda_memory_summary(model: Any, optimizer: Any = None) -> Dict[str, float] | Dict[str, str]:
+    if not torch.cuda.is_available():
+        return {"状态": "CUDA不可用"}
+
+    device = None
+    if hasattr(model, "device"):
+        device = model.device
+    else:
+        try:
+            device = next(model.parameters()).device
+        except StopIteration:
+            device = torch.device("cuda:0")
+
+    if device is None or device.type != "cuda":
+        return {"状态": "模型当前不在CUDA设备上"}
+
+    device_index = device.index if device.index is not None else torch.cuda.current_device()
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device_index)
+    allocated = torch.cuda.memory_allocated(device_index)
+    reserved = torch.cuda.memory_reserved(device_index)
+    max_allocated = torch.cuda.max_memory_allocated(device_index)
+    max_reserved = torch.cuda.max_memory_reserved(device_index)
+    trainable_param_bytes = _estimate_param_bytes(model, trainable_only=True)
+    frozen_param_bytes = _estimate_param_bytes(model, trainable_only=False)
+    grad_bytes = _estimate_grad_bytes(model)
+    optimizer_state_bytes = _estimate_optimizer_state_bytes(optimizer)
+    approx_activation_and_temp_bytes = max(
+        0,
+        allocated - trainable_param_bytes - frozen_param_bytes - grad_bytes - optimizer_state_bytes,
+    )
+    return {
+        "当前已分配显存(GiB)": _bytes_to_gib(allocated),
+        "当前已保留显存(GiB)": _bytes_to_gib(reserved),
+        "峰值已分配显存(GiB)": _bytes_to_gib(max_allocated),
+        "峰值已保留显存(GiB)": _bytes_to_gib(max_reserved),
+        "当前可用显存(GiB)": _bytes_to_gib(free_bytes),
+        "显存总量(GiB)": _bytes_to_gib(total_bytes),
+        "模型可训练参数显存(GiB)": _bytes_to_gib(trainable_param_bytes),
+        "模型冻结参数显存(GiB)": _bytes_to_gib(frozen_param_bytes),
+        "当前梯度显存(GiB)": _bytes_to_gib(grad_bytes),
+        "当前优化器状态显存(GiB)": _bytes_to_gib(optimizer_state_bytes),
+        "估算激活与临时显存(GiB)": _bytes_to_gib(approx_activation_and_temp_bytes),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +147,17 @@ def parse_args() -> argparse.Namespace:
         "--timing-log-path",
         default="",
         help="Optional timing log JSONL path. Defaults to <output_dir>/timing_metrics.jsonl.",
+    )
+    parser.add_argument(
+        "--debug-sample-log-path",
+        default="",
+        help="Optional JSONL path for dumping a few online rollout samples. Defaults to <output_dir>/debug_online_rollout_samples.jsonl.",
+    )
+    parser.add_argument(
+        "--debug-sample-limit-per-log",
+        type=int,
+        default=2,
+        help="How many rollout samples to dump per rollout_func call.",
     )
     parser.add_argument(
         "--use-rl-lora",
@@ -109,6 +201,7 @@ def load_model_and_tokenizer(args: argparse.Namespace):
     )
     if tokenizer.pad_token is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
 
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model_path,
@@ -239,13 +332,18 @@ class OnlineTimingTracker:
 
 
 class TimingCallback(TrainerCallback):
-    def __init__(self, tracker: OnlineTimingTracker, log_path: str, metrics_log_path: str):
+    def __init__(self, tracker: OnlineTimingTracker, log_path: str, metrics_log_path: str, model: Any):
         self.tracker = tracker
         self._step_started_at = None
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.metrics_log_path = Path(metrics_log_path)
         self.metrics_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.model = model
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
 
     def on_step_begin(self, args, state, control, **kwargs):
         self._step_started_at = time.perf_counter()
@@ -257,6 +355,7 @@ class TimingCallback(TrainerCallback):
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         summary = self.tracker.build_summary()
+        memory_summary = _build_cuda_memory_summary(self.model, kwargs.get("optimizer"))
         chinese_summary = {
             "训练步数": summary["train_steps"],
             "rollout调用次数": summary["rollout_calls"],
@@ -276,6 +375,10 @@ class TimingCallback(TrainerCallback):
             "组内reward标准差均值": summary["avg_group_reward_std"],
             "组内reward零方差比例": summary["zero_std_group_rate"],
         }
+        if "状态" not in memory_summary:
+            chinese_summary.update(memory_summary)
+        else:
+            chinese_summary["显存统计状态"] = memory_summary["状态"]
         print("[时间统计]", json.dumps(chinese_summary, ensure_ascii=False))
         with self.log_path.open("a", encoding="utf-8") as f:
             f.write(
@@ -284,6 +387,7 @@ class TimingCallback(TrainerCallback):
                         "global_step": int(getattr(state, "global_step", 0)),
                         "timing_summary": chinese_summary,
                         "raw_summary": summary,
+                        "memory_summary": memory_summary,
                     },
                     ensure_ascii=False,
                 )
@@ -297,6 +401,7 @@ class TimingCallback(TrainerCallback):
                         "trainer_logs": logs or {},
                         "rollout_summary": chinese_summary,
                         "raw_rollout_summary": summary,
+                        "memory_summary": memory_summary,
                     },
                     ensure_ascii=False,
                 )
@@ -359,7 +464,12 @@ def build_rollout_func(
     seed_by_id: Dict[str, Dict[str, Any]],
     use_chat_template: bool,
     tracker: OnlineTimingTracker,
+    debug_sample_log_path: str,
+    debug_sample_limit_per_log: int,
 ):
+    debug_log_path = Path(debug_sample_log_path)
+    debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+
     def _rollout_func(prompts: List[str], trainer: Any) -> Dict[str, List[Any]]:
         env = Text2SQLRLEnv()
         batch_size = len(prompts)
@@ -385,6 +495,7 @@ def build_rollout_func(
         group_reward_std_total = 0.0
         group_count = 0
         zero_std_group_count = 0
+        debug_samples: List[Dict[str, Any]] = []
 
         grouped_indices: Dict[str, List[int]] = {}
         for idx, prompt in enumerate(prompts):
@@ -423,6 +534,28 @@ def build_rollout_func(
                 env_reward_total += float(episode["env_reward"])
                 final_result_match_count += 1 if episode["final_result_match"] else 0
                 group_rewards.append(float(episode["env_reward"]))
+                if len(debug_samples) < debug_sample_limit_per_log:
+                    try:
+                        episode_obj = json.loads(episode["episode_json"])
+                    except Exception:
+                        episode_obj = {}
+                    steps = episode_obj.get("steps", []) if isinstance(episode_obj, dict) else []
+                    last_step = steps[-1] if steps else {}
+                    debug_samples.append(
+                        {
+                            "seed_id": seed_id,
+                            "env_reward": float(episode["env_reward"]),
+                            "turn_count": int(episode["turn_count"]),
+                            "final_failure_reason": episode["final_failure_reason"],
+                            "final_result_match": bool(episode["final_result_match"]),
+                            "prompt_token_count": prompt_token_count,
+                            "completion_token_count": completion_token_count,
+                            "last_prompt": last_step.get("prompt", ""),
+                            "last_completion": last_step.get("completion", ""),
+                            "last_action_type": last_step.get("action_type"),
+                            "last_reward_breakdown": last_step.get("reward_breakdown", {}),
+                        }
+                    )
 
             if group_rewards:
                 group_count += 1
@@ -450,6 +583,10 @@ def build_rollout_func(
             group_count=group_count,
             zero_std_group_count=zero_std_group_count,
         )
+        if debug_samples:
+            with debug_log_path.open("a", encoding="utf-8") as f:
+                for sample in debug_samples:
+                    f.write(json.dumps(sample, ensure_ascii=False) + "\n")
         if any(item is None for item in prompt_ids_batch + completion_ids_batch + logprobs_batch):
             raise RuntimeError("rollout_func 生成结果数量与输入 prompts 数量不一致。")
         return {
@@ -477,6 +614,8 @@ def build_trainer(
     seed_by_id: Dict[str, Dict[str, Any]],
     timing_log_path: str,
     metrics_log_path: str,
+    debug_sample_log_path: str,
+    debug_sample_limit_per_log: int,
 ):
     tracker = OnlineTimingTracker()
     reward_func = OnlineEpisodeRewardFunc()
@@ -484,6 +623,8 @@ def build_trainer(
         seed_by_id=seed_by_id,
         use_chat_template=use_chat_template,
         tracker=tracker,
+        debug_sample_log_path=debug_sample_log_path,
+        debug_sample_limit_per_log=debug_sample_limit_per_log,
     )
     trainer_kwargs = {
         "model": model,
@@ -504,7 +645,7 @@ def build_trainer(
         trainer_kwargs.pop("processing_class", None)
         trainer_kwargs["tokenizer"] = tokenizer
         trainer = GRPOTrainer(**trainer_kwargs)
-    trainer.add_callback(TimingCallback(tracker, timing_log_path, metrics_log_path))
+    trainer.add_callback(TimingCallback(tracker, timing_log_path, metrics_log_path, model))
     return trainer
 
 
@@ -527,6 +668,7 @@ def main() -> None:
     training_args = build_training_args(args)
     timing_log_path = args.timing_log_path or str(output_dir / "timing_metrics.jsonl")
     metrics_log_path = str(output_dir / "training_metrics.jsonl")
+    debug_sample_log_path = args.debug_sample_log_path or str(output_dir / "debug_online_rollout_samples.jsonl")
     trainer = build_trainer(
         model=model,
         tokenizer=tokenizer,
@@ -537,6 +679,8 @@ def main() -> None:
         seed_by_id=seed_by_id,
         timing_log_path=timing_log_path,
         metrics_log_path=metrics_log_path,
+        debug_sample_log_path=debug_sample_log_path,
+        debug_sample_limit_per_log=args.debug_sample_limit_per_log,
     )
 
     (output_dir / "run_config.json").write_text(
