@@ -17,10 +17,10 @@ class DifficultyBudget:
 
 @dataclass(frozen=True)
 class RewardConfig:
-    final_result_weight: float = 5.0
-    sql_ngram_weight: float = 0.3
-    first_successful_probe_reward: float = 0.2
-    failed_probe_penalty: float = -0.3
+    final_result_weight: float = 3.5
+    sql_ngram_weight: float = 0.8
+    first_successful_probe_reward: float = 0.3
+    failed_probe_penalty: float = -0.4
     format_error_penalty: float = -1.0
     final_exec_fail_penalty: float = -0.5
 

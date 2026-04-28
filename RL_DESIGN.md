@@ -568,9 +568,9 @@ Episode 在以下情况终止：
 
 对于中间 `<sql>`：
 
-- 第一次成功可执行 probe：`+0.2`
+- 第一次成功可执行 probe：`+0.3`
 - 后续成功可执行 probe：`0`
-- 执行失败：`-0.3`
+- 执行失败：`-0.4`
 
 第一版不判断“信息增益”，只判断能否执行。
 这样可以避免模型重复刷“可执行分”。
@@ -635,8 +635,8 @@ r_{turn} = -\lambda_d \cdot \max(0, n_{sql\_probe} - b_d)
 建议第一版使用：
 
 ```text
-R = 5.0 * r_final_result
-  + 0.3 * r_sql_ngram
+R = 3.5 * r_final_result
+  + 0.8 * r_sql_ngram
   + r_exec_step
   + r_turn
   + r_format
@@ -645,8 +645,8 @@ R = 5.0 * r_final_result
 
 说明：
 
-- `r_final_result` 是主导项
-- `r_sql_ngram` 只是弱辅助
+- `r_final_result` 仍然是主导项，但不再过强
+- `r_sql_ngram` 被适度增强，用于稳定 SQL 方向
 - 中间 SQL 可执行性用于稳定 rollout
 - turn penalty 用于鼓励少 probe、少无效探索
 - `r_final_exec_fail` 用于显式惩罚“final SQL 根本跑不通”

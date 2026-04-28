@@ -1,6 +1,6 @@
 # 实验总结
 
-这份文档用于记录当前阶段 `普通版 Final-SQL SFT`、`Agent 单轮 SFT`、`Agent 整体轨迹 SFT` 的对比结果，并给出阶段性结论。
+这份文档用于记录当前阶段 `普通版 Final-SQL SFT`、`Agent 单轮 SFT`、`Agent 整体轨迹 SFT` 以及后续 `GRPO` 实验的对比结果，并给出阶段性结论。
 
 ## 1. 实验目的
 
@@ -22,8 +22,11 @@
 
 1. `Agent 单轮 SFT` 明显优于 `普通版 Final-SQL SFT`
 2. `Agent 单轮 SFT` 也明显优于 `Agent 整体轨迹 SFT`
-3. 因此，当前阶段最值得继续推进的主线是：
-   `Agent 单轮 SFT -> 后续 RL`
+3. `single-step GRPO` 没有超过最优的 `Agent 单轮 SFT`
+4. `online multi-turn GRPO` 比 `single-step GRPO` 更合理，也更接近目标方向
+5. 但当前 `online multi-turn GRPO` 仍未超过最优的 `Agent 单轮 SFT`
+6. 因此，当前阶段最值得继续推进的主线仍然是：
+   `Agent 单轮 SFT -> online multi-turn RL`
 
 ## 3. 关键对比结果
 
@@ -76,6 +79,50 @@
 - `result_match_rate = 0.1569`
 
 这说明当前整体轨迹版在数据量较小时明显更难训稳。
+
+### 3.4 Agent 单轮版 + single-step GRPO
+
+离线结果：
+
+- `protocol_valid_rate = 0.8571`
+- `action_type_accuracy = 0.6939`
+
+执行评测结果：
+
+- `pred_exec_success_rate = 0.4286`
+- `result_match_rate = 0.1837`
+- `pred_sql_exec_success_rate = 0.7000`
+- `pred_solution_exec_success_rate = 0.3182`
+
+这说明：
+
+- single-step GRPO 没有带来正收益
+- 它比最优 `Agent 单轮 SFT` 明显回退
+- 但仍然优于最弱的整体轨迹版
+
+### 3.5 Agent Online 多轮版 + GRPO
+
+离线结果：
+
+- `protocol_valid_rate = 0.8571`
+- `action_type_accuracy = 0.6939`
+- `action_body_exact_match_rate = 0.1429`
+
+执行评测结果：
+
+- `pred_exec_success_rate = 0.3878`
+- `result_match_rate = 0.2245`
+- `pred_sql_exec_success_rate = 0.5238`
+- `pred_solution_exec_success_rate = 0.3810`
+
+这说明：
+
+- online GRPO 比 single-step GRPO 更合理
+- 它在 `pred_solution_exec_success_rate` 上已经优于最优 SFT
+- 但整体 `pred_exec_success_rate` 与 `result_match_rate` 仍未超过最优 SFT
+- 当前趋势更像是：
+  - `solution` 有所改善
+  - `probe` 质量下降
 
 ## 4. 为什么 Agent 单轮版效果更好
 
@@ -155,6 +202,32 @@ Agent 单轮版是：
 
 因此，在当前数据规模下，整体轨迹版不适合作为主线方案。
 
+## 5. 为什么当前 RL 还没有超过 best SFT
+
+从当前结果看：
+
+- `single-step GRPO` 明显没有对齐完整 agent 目标
+- `online multi-turn GRPO` 已经比 `single-step GRPO` 更合理
+- 但 reward 设计当前更偏终局结果，因此 probe 质量下降较明显
+
+这体现在：
+
+- 最优 SFT 的 `pred_sql_exec_success_rate = 0.7895`
+- online GRPO 的 `pred_sql_exec_success_rate = 0.5238`
+
+与此同时：
+
+- 最优 SFT 的 `pred_solution_exec_success_rate = 0.3333`
+- online GRPO 的 `pred_solution_exec_success_rate = 0.3810`
+
+所以当前 RL 更像是在“牺牲中间 probe，换取一点 final solution 改善”。
+
+这说明后续如果继续做 RL，更值得优化的是：
+
+- probe 质量
+- action type 决策
+- reward 对中间探索行为的约束
+
 ## 6. 这个对比实验是否有效
 
 当前实验是有效的，原因是：
@@ -166,6 +239,10 @@ Agent 单轮版是：
 因此，这个实验可以支持一个阶段性结论：
 
 > 在当前数据规模和实验设置下，Agent 单轮式 SFT 相比普通 final-SQL SFT 是有效的，并且能够带来更高的 SQL 可执行率和更高的最终结果匹配率。
+
+同时当前 RL 实验支持：
+
+> online multi-turn GRPO 比 single-step GRPO 更符合 agent 训练目标，但当前整体效果仍未超过最佳的 Agent 单轮 SFT 基线。
 
 ## 7. 当前还不能过度解读的地方
 
@@ -189,12 +266,15 @@ Agent 单轮版是：
 
 - `Agent 单轮 SFT` 是一个有效的冷启动方案
 - 但还不是最终成品
+- `online multi-turn GRPO` 是一个方向正确的后续方案
+- 但当前还不能说 RL 已经带来整体正收益
 
 ## 8. 对后续 RL 的意义
 
 当前结果支持：
 
 - 后续 RL 应该基于 `Agent 单轮 SFT` 继续做
+- 而且应优先走 `online multi-turn GRPO` 路线，而不是回到 `single-step GRPO`
 
 原因是：
 
@@ -215,9 +295,10 @@ Agent 单轮版是：
 建议当前项目的优先级如下：
 
 1. `Agent 单轮 SFT`
-2. `基于 Agent 单轮 SFT 的 RL`
+2. `基于 Agent 单轮 SFT 的 online multi-turn RL`
 3. `普通版 baseline` 作为对照
-4. `整体轨迹版` 保留为补充实验，不作为主线
+4. `single-step GRPO` 保留为负例对照
+5. `整体轨迹版` 保留为补充实验，不作为主线
 
 ## 10. 一句话总结
 

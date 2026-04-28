@@ -9,13 +9,15 @@ __pycache__/
 venv/
 env/
 
+# Python tooling cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # Build / packaging
 build/
 dist/
 *.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 
 # IDE / editor
 .idea/
@@ -24,42 +26,55 @@ dist/
 *.swo
 .DS_Store
 
-# Local logs and temp files
+# Logs / temp
 logs/
+tmp/
 tmp_new/
 tmp_agent_rl/
 *.log
 
-# Local debug / checkpoints
+# Local debug files
 debug_last_generated_sql.sql
 
-# Generated outputs
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Generated outputs / training runs
 output/
 saves/
 checkpoints/
 runs/
+wandb/
 
-# Training artifacts
+# Model / adapter artifacts
+model/
+model_dpo/
 adapter_model/
 adapter_model*/
 lora/
 lora*/
-
-# Local databases / vectors / binary caches
-*.pkl
-*.pt
 *.bin
+*.pt
+*.pth
+*.ckpt
 *.safetensors
-*.json
-*.jsonl
+
+# Large archives / exports
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.parquet
+
+# Local databases / caches
+*.pkl
 
 # Secrets / env files
 .env
 .env.*
 
-# Optional local copies of large data
-data/
-
-# md and other documentation files
-AGENTS.md
-generate_sft_dpo_data.py
+# json files
+*.json
+*.jsonl

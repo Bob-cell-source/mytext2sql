@@ -18,6 +18,7 @@
 | 版本 | 是否做 RL | 学什么任务 | 典型输出 |
 | --- | --- | --- | --- |
 | Agent 单轮版 + GRPO | 是 | `current state -> next action` 的 reward 优化 | `<reasoning> + <sql>` 或 `<solution>` |
+| Agent Online 多轮版 + GRPO | 是 | 从初始 seed 在线 rollout 整条轨迹后做 reward 优化 | `<reasoning> + <sql>` 或 `<solution>` |
 
 这里说的“普通版”不是“没训练过的 base model”，而是“做了 SFT，但任务形式是传统 final SQL 生成”。
 
@@ -133,20 +134,55 @@
 - RL 是否改善了最终 solution 的质量
 - RL 在完整题级 rollout 上的表现如何
 
+### E. Agent Online 多轮版 + GRPO
+
+定义：
+
+- 以 `Agent 单轮 SFT` 模型为初始化
+- 用 online multi-turn GRPO 继续优化：
+  - 从初始 seed 出发
+  - 在线 rollout 多轮轨迹
+  - reward 基于整条 episode
+
+训练配置：
+
+- `scripts/prepare_online_grpo_seeds.py`
+- `agent_rl/online_rollout.py`
+- `scripts/train_grpo_online_trl.py`
+
+推荐评测分两层：
+
+1. **同口径验证集评测**
+   - `scripts/merge_lora_adapter.py`
+   - `scripts/vllm_batch_infer.py`
+   - `scripts/evaluate_sql_execution_from_report.py`
+
+2. **整题 rollout 评测**
+   - `scripts/evaluate_agent_rollout.py`
+
+适合回答的问题：
+
+- online multi-turn RL 是否优于 single-step GRPO
+- online RL 是否能改善 final solution 质量
+- online RL 是否能在完整轨迹层面带来正收益
+
 ## 2. 当前阶段的推荐结论
 
 在你目前已经跑过的实验里：
 
 - Agent 单轮拆分版明显强于整体轨迹版
 - 整体轨迹版目前不适合作为主线
-- 现在最重要的缺失对照就是普通版 Final-SQL Baseline
+- 普通版 Final-SQL Baseline 已作为有效对照完成
+- single-step GRPO 没有超过 best SFT
+- online multi-turn GRPO 比 single-step GRPO 更合理，但当前仍未超过 best SFT
 
 所以当前推荐优先级：
 
-1. 普通版 Final-SQL Baseline
-2. Agent 单轮拆分版
-3. Agent 整体轨迹版
-4. Agent 单轮版 + GRPO（在单轮版验证有效后进入）
+1. Agent 单轮拆分版
+2. Agent Online 多轮版 + GRPO
+3. 普通版 Final-SQL Baseline
+4. Agent 单轮版 + GRPO（single-step，保留作过渡方案）
+5. Agent 整体轨迹版
 
 ## 3. 推荐对比指标
 
@@ -180,6 +216,27 @@
 - `avg_turns`
 - rollout 层面的 `result_match_rate`
 - `failure_breakdown`
+
+### Agent Online 多轮版 + GRPO
+
+先继续沿用上面的单轮版同口径指标：
+
+- `protocol_valid_rate`
+- `action_type_accuracy`
+- `pred_exec_success_rate`
+- `result_match_rate`
+- `pred_solution_exec_success_rate`
+
+再补一组完整 rollout 指标：
+
+- `avg_turns`
+- rollout 层面的 `result_match_rate`
+- `failure_breakdown`
+
+当前已观察到的重点是：
+
+- online GRPO 相比 single-step GRPO，`pred_solution_exec_success_rate` 更高
+- 但 `pred_exec_success_rate` 与 `result_match_rate` 仍未超过 best SFT
 
 ## 4. 最小对照实验
 
@@ -258,6 +315,52 @@
 ### 多版本对比汇总
 
 - `scripts/compare_experiment_reports.py`
+
+## 7. 当前关键结果摘要
+
+### A. 普通版 Final-SQL Baseline
+
+- `pred_exec_success_rate = 0.2353`
+- `result_match_rate = 0.2353`
+
+### B. Agent 单轮 SFT（当前 best）
+
+- `protocol_valid_rate = 0.8776`
+- `action_type_accuracy = 0.7143`
+- `pred_exec_success_rate = 0.4694`
+- `result_match_rate = 0.2857`
+- `pred_sql_exec_success_rate = 0.7895`
+- `pred_solution_exec_success_rate = 0.3333`
+
+### C. Agent 整体轨迹 SFT
+
+- `pred_exec_success_rate = 0.2745`
+- `result_match_rate = 0.1569`
+
+### D. Agent 单轮版 + single-step GRPO
+
+- `protocol_valid_rate = 0.8571`
+- `action_type_accuracy = 0.6939`
+- `pred_exec_success_rate = 0.4286`
+- `result_match_rate = 0.1837`
+- `pred_sql_exec_success_rate = 0.7000`
+- `pred_solution_exec_success_rate = 0.3182`
+
+### E. Agent Online 多轮版 + GRPO
+
+- `protocol_valid_rate = 0.8571`
+- `action_type_accuracy = 0.6939`
+- `pred_exec_success_rate = 0.3878`
+- `result_match_rate = 0.2245`
+- `pred_sql_exec_success_rate = 0.5238`
+- `pred_solution_exec_success_rate = 0.3810`
+
+### 当前最稳的阶段性结论
+
+- best SFT 仍然是 `Agent 单轮 SFT`
+- online multi-turn GRPO 明显优于 single-step GRPO
+- online multi-turn GRPO 在 `pred_solution_exec_success_rate` 上有正向趋势
+- 但 online multi-turn GRPO 目前还没有超过 best SFT 的整体执行效果
 
 ### RL / rollout 评测
 

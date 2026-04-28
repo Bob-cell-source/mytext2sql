@@ -135,6 +135,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-prompt-length", type=int, default=3072)
     parser.add_argument("--max-completion-length", type=int, default=512)
     parser.add_argument("--num-generations", type=int, default=2)
+    parser.add_argument(
+        "--loss-type",
+        default="",
+        help="Optional GRPO loss type, e.g. grpo / dapo / dr_grpo / sapo. Empty means use TRL default.",
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=None,
+        help="Optional KL beta for GRPO. Leave unset to use TRL default.",
+    )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.8)
     parser.add_argument("--repetition-penalty", type=float, default=1.05)
@@ -445,6 +456,10 @@ def build_training_args(args: argparse.Namespace) -> GRPOConfig:
         "report_to": report_to,
         "remove_unused_columns": False,
     }
+    if args.loss_type:
+        common_kwargs["loss_type"] = args.loss_type
+    if args.beta is not None:
+        common_kwargs["beta"] = args.beta
     if eval_strategy != "no":
         common_kwargs["eval_steps"] = args.eval_steps
     sig = inspect.signature(GRPOConfig.__init__)

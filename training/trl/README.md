@@ -126,6 +126,8 @@ python3 scripts/train_grpo_online_trl.py \
   --learning-rate 5e-6 \
   --num-train-epochs 1 \
   --num-generations 2 \
+  --loss-type dr_grpo \
+  --beta 0.0 \
   --max-prompt-length 3072 \
   --max-completion-length 512 \
   --logging-steps 5 \
@@ -162,6 +164,8 @@ python3 scripts/train_grpo_online_trl.py \
   --learning-rate 5e-6 \
   --num-train-epochs 1 \
   --num-generations 2 \
+  --loss-type dr_grpo \
+  --beta 0.0 \
   --max-prompt-length 3072 \
   --max-completion-length 512 \
   --logging-steps 5 \
@@ -175,6 +179,27 @@ python3 scripts/train_grpo_online_trl.py \
 - 这版训练依赖 TRL 的 `rollout_func`
 - 训练时不再使用静态中间 state pool
 - reward 直接来自整条 episode 的在线 rollout
+
+### 2.3 `loss_type` 和 `beta`
+
+当前脚本支持显式传：
+
+- `--loss-type`
+- `--beta`
+
+推荐起步值：
+
+- `--loss-type dr_grpo`
+- `--beta 0.0`
+
+解释：
+
+- `loss_type`
+  决定 TRL 的 GRPO 具体使用哪种 loss 公式。当前更推荐 `dr_grpo` 或 `dapo`，不建议长期停留在最原始的 `grpo`。
+- `beta`
+  是 KL 正则权重。`0.0` 表示先不加 KL，只靠 reward 做在线优化。
+
+如果你当前安装的 TRL 版本不支持这两个字段，脚本会在启动时打印兼容提示，并自动忽略不支持的参数。
 
 ## 3. online 版的核心代码
 
